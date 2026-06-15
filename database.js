@@ -1,18 +1,122 @@
 /**
- * DAKANI DATABASE ENGINE
- * localStorage-based relational store mimicking SQL tables.
+ * DAKANI DATABASE ENGINE (IndexedDB Version)
+ * Uses IndexedDB for persistence and an in-memory cache for synchronous operations.
  * Tables: products, categories, customers, sales, sale_items, purchases, settings
  */
 
 const DB = (() => {
   const PREFIX = 'dakani_';
+  
+  // ─── Memory Cache ───────────────────────────────────────────────────────────
+  // نحتفظ بالبيانات هنا لكي تبقى الدوال المتزامنة (Sync) تعمل دون مشاكل
+  const cache = {
+    seeded: [],
+    settings: {},
+    categories: [],
+    products: [],
+    customers: [],
+    sales: [],
+    sale_items: [],
+    purchases: []
+  };
 
-  // ─── Core ───────────────────────────────────────────────────────────────────
-  const read  = key => { try { return JSON.parse(localStorage.getItem(PREFIX + key)) || []; } catch { return []; } };
-  const write = (key, val) => localStorage.setItem(PREFIX + key, JSON.stringify(val));
+  // ─── IndexedDB Core ─────────────────────────────────────────────────────────
+  const idb = {
+    db: null,
+    init() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open('DakaniDB', 1);
+        req.onupgradeneeded = e => {
+          e.target.result.createObjectStore('keyval');
+        };
+        req.onsuccess = e => {
+          this.db = e.target.result;
+          resolve();
+        };
+        req.onerror = e => reject(e.target.error);
+      });
+    },
+    get(key) {
+      return new Promise(resolve => {
+        try {
+          const tx = this.db.transaction('keyval', 'readonly');
+          const req = tx.objectStore('keyval').get(key);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => resolve(undefined);
+        } catch(e) { resolve(undefined); }
+      });
+    },
+    set(key, val) {
+      return new Promise(resolve => {
+        try {
+          const tx = this.db.transaction('keyval', 'readwrite');
+          const req = tx.objectStore('keyval').put(val, key);
+          req.onsuccess = () => resolve();
+          req.onerror = () => resolve();
+        } catch(e) { resolve(); }
+      });
+    },
+    clearAll() {
+      return new Promise(resolve => {
+        try {
+          const tx = this.db.transaction('keyval', 'readwrite');
+          const req = tx.objectStore('keyval').clear();
+          req.onsuccess = () => resolve();
+          req.onerror = () => resolve();
+        } catch(e) { resolve(); }
+      });
+    }
+  };
+
+  // ─── Core Helpers ───────────────────────────────────────────────────────────
+  const read  = key => cache[key];
+  const write = (key, val) => {
+    cache[key] = val; // تحديث الذاكرة فوراً للواجهة
+    idb.set(PREFIX + key, val); // الحفظ في IndexedDB في الخلفية
+  };
   const uid   = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const now   = () => new Date().toISOString();
   const today = () => new Date().toISOString().slice(0, 10);
+
+  // ─── App Initialization Interceptor ─────────────────────────────────────────
+  // هذه الحيلة تؤخر حدث DOMContentLoaded حتى يتم جلب البيانات من IndexedDB
+  // لكي يعمل script.js بسلاسة وبدون أي تعديل عليه.
+  const originalAddEventListener = document.addEventListener;
+  const deferredListeners = [];
+  let isReady = false;
+
+  document.addEventListener = function(type, listener, options) {
+    if (type === 'DOMContentLoaded' && !isReady) {
+      deferredListeners.push(listener);
+    } else {
+      originalAddEventListener.call(document, type, listener, options);
+    }
+  };
+
+  async function boot() {
+    await idb.init();
+    
+    // سحب كل البيانات المحفوظة إلى الذاكرة المؤقتة
+    const keys = Object.keys(cache);
+    for (let k of keys) {
+      const val = await idb.get(PREFIX + k);
+      if (val !== undefined) cache[k] = val;
+    }
+
+    seed(); // تهيئة القيم الافتراضية إذا كانت فارغة
+    
+    isReady = true;
+    document.addEventListener = originalAddEventListener;
+
+    const fire = () => deferredListeners.forEach(fn => fn({type: 'DOMContentLoaded'}));
+    if (document.readyState === 'loading') {
+      originalAddEventListener.call(document, 'DOMContentLoaded', fire);
+    } else {
+      fire();
+    }
+  }
+  
+  boot(); // بدء التحميل بمجرد قراءة الملف
 
   // ─── Seed defaults ──────────────────────────────────────────────────────────
   function seed() {
@@ -29,8 +133,8 @@ const DB = (() => {
 
   // ─── SETTINGS ───────────────────────────────────────────────────────────────
   const Settings = {
-    get: () => { try { return JSON.parse(localStorage.getItem(PREFIX + 'settings')) || {}; } catch { return {}; } },
-    save: obj => localStorage.setItem(PREFIX + 'settings', JSON.stringify(obj))
+    get: () => read('settings') || {},
+    save: obj => write('settings', obj)
   };
 
   // ─── CATEGORIES ─────────────────────────────────────────────────────────────
@@ -203,7 +307,7 @@ const DB = (() => {
     a.href = URL.createObjectURL(blob);
     a.download = `dakani-backup-${today()}.json`;
     a.click();
-    toast('تم تصدير البيانات بنجاح / Data exported!', 'success');
+    if (typeof toast === 'function') toast('تم تصدير البيانات بنجاح / Data exported!', 'success');
   }
 
   function importData(event) {
@@ -218,18 +322,18 @@ const DB = (() => {
         if (data.sales)      write('sales', data.sales);
         if (data.sale_items) write('sale_items', data.sale_items);
         if (data.purchases)  write('purchases', data.purchases);
-        if (data.settings)   Settings.save(data.settings);
-        toast('تم الاستيراد بنجاح! جارٍ إعادة التحميل... / Import success!', 'success');
+        if (data.settings)   write('settings', data.settings);
+        if (typeof toast === 'function') toast('تم الاستيراد بنجاح! جارٍ إعادة التحميل... / Import success!', 'success');
         setTimeout(() => location.reload(), 1500);
-      } catch { toast('ملف غير صالح / Invalid file', 'error'); }
+      } catch { if (typeof toast === 'function') toast('ملف غير صالح / Invalid file', 'error'); }
     };
     reader.readAsText(file);
   }
 
   function resetAll() {
-    ['products','categories','customers','sales','sale_items','purchases','settings','seeded']
-      .forEach(k => localStorage.removeItem(PREFIX + k));
-    location.reload();
+    idb.clearAll().then(() => {
+      location.reload();
+    });
   }
 
   function stats() {
@@ -238,14 +342,9 @@ const DB = (() => {
       customers: read('customers').length,
       sales:     read('sales').length,
       purchases: read('purchases').length,
-      size:      (new Blob([JSON.stringify(Object.fromEntries(
-        Object.keys(localStorage).filter(k => k.startsWith(PREFIX))
-          .map(k => [k, localStorage.getItem(k)])
-      ))]).size / 1024).toFixed(1) + ' KB'
+      size:      (new Blob([JSON.stringify(cache)]).size / 1024).toFixed(1) + ' KB'
     };
   }
-
-  seed();
 
   return { Settings, Categories, Products, Customers, Sales, Purchases,
            exportData, importData, resetAll, stats, uid, today, now };
