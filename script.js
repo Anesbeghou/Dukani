@@ -847,4 +847,11 @@ function toast(msg, type = 'info') {
   setTimeout(() => { el.classList.add('fade-out'); setTimeout(() => el.remove(), 400); }, 3500);
 }
 
-
+// ─── تسجيل نظام العمل دون اتصال الديناميكي (Dakani PWA Active) ───────────────
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js')
+      .then(reg => console.log('دكاني جاهز للعمل دون اتصال بنجاح! / Scope:', reg.scope))
+      .catch(err => console.error('خطأ في تسجيل نظام الـ PWA:', err));
+  });
+}
