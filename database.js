@@ -116,7 +116,42 @@ const DB = (() => {
     }
   }
   
-  boot(); // بدء التحميل بمجرد قراءة الملف
+  // ─── License Gate ────────────────────────────────────────────────────────────
+  // يتحقق من الترخيص قبل تشغيل أي شيء
+  // إذا لم يكن مرخصاً → تُعلَّق حدث DOMContentLoaded ولا يعمل التطبيق
+  async function bootWithLicenseCheck() {
+    await idb.init();
+    const keys = Object.keys(cache);
+    for (let k of keys) {
+      const val = await idb.get(PREFIX + k);
+      if (val !== undefined) cache[k] = val;
+    }
+    seed();
+    isReady = true;
+    document.addEventListener = originalAddEventListener;
+
+    // التحقق من الترخيص - يحتاج DakaniLicense معرَّف قبل هذا الملف
+    if (typeof DakaniLicense !== 'undefined') {
+      const licensed = DakaniLicense.gate();
+      if (!licensed) {
+        // انتظر حتى يدخل التاجر مفتاحه الصحيح
+        window.addEventListener('dakani-licensed', () => {
+          deferredListeners.forEach(fn => fn({type: 'DOMContentLoaded'}));
+        }, { once: true });
+        return; // لا تشغّل التطبيق قبل الترخيص
+      }
+    }
+
+    const fire = () => deferredListeners.forEach(fn => fn({type: 'DOMContentLoaded'}));
+    if (document.readyState === 'loading') {
+      originalAddEventListener.call(document, 'DOMContentLoaded', fire);
+    } else {
+      fire();
+    }
+  }
+
+  boot = bootWithLicenseCheck;
+  boot(); // بدء التحميل مع فحص الترخيص
 
   // ─── Seed defaults ──────────────────────────────────────────────────────────
   function seed() {
