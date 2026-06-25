@@ -328,11 +328,13 @@
         <thead><tr>
           <th>رقم الفاتورة / Invoice #</th><th>الزبون / Customer</th>
           <th>المبلغ / Amount</th><th>الخصم / Disc</th><th>الربح / Profit</th>
-          <th>الدفع / Payment</th><th>التاريخ / Date</th><th>إجراءات</th>
+          <th>الدفع / Payment</th><th>التاريخ / Date</th><th>عرض</th><th>حذف</th>
         </tr></thead>
         <tbody id="invoices-body"></tbody>
+        <tfoot id="invoices-foot"></tfoot>
       </table>
     </div>
+    <div class="inv-summary-bar" id="inv-summary-bar"></div>
   </div>
 
   <!-- ===== REPORTS PAGE ===== -->
@@ -579,17 +581,49 @@
   </div>
 </div>
 
-<!-- Invoice View Modal -->
-<div class="modal-overlay" id="modal-invoice">
-  <div class="modal modal-invoice-view" id="invoice-print-area">
-    <div class="modal-header no-print">
-      <h2>تفاصيل الفاتورة / Invoice Details</h2>
-      <button onclick="closeModal('modal-invoice')"><i class="fas fa-xmark"></i></button>
+<!-- Invoice View Modal — Professional Print Preview -->
+<div class="modal-overlay" id="modal-invoice" onclick="handleInvoiceOverlayClick(event)">
+  <div class="invoice-preview-wrapper" id="invoice-preview-wrapper">
+    <!-- Sidebar controls (no-print) -->
+    <div class="inv-sidebar-controls no-print">
+      <div class="inv-ctrl-brand">
+        <i class="fas fa-file-invoice"></i>
+        <span>معاينة الفاتورة</span>
+      </div>
+      <div class="inv-ctrl-actions">
+        <button class="inv-ctrl-btn primary" onclick="printInvoice()">
+          <i class="fas fa-print"></i> طباعة
+        </button>
+        <button class="inv-ctrl-btn secondary" onclick="shareInvoiceWhatsApp()">
+          <i class="fab fa-whatsapp"></i> واتساب
+        </button>
+        <button class="inv-ctrl-btn danger" id="inv-delete-btn" onclick="deleteCurrentInvoice()">
+          <i class="fas fa-trash"></i> حذف الفاتورة
+        </button>
+        <button class="inv-ctrl-btn ghost" onclick="closeModal('modal-invoice')">
+          <i class="fas fa-xmark"></i> إغلاق
+        </button>
+      </div>
+      <div class="inv-ctrl-meta" id="inv-ctrl-meta"></div>
     </div>
-    <div id="invoice-content"></div>
-    <div class="modal-footer no-print">
-      <button class="btn-secondary" onclick="closeModal('modal-invoice')">إغلاق / Close</button>
-      <button class="btn-primary" onclick="window.print()"><i class="fas fa-print"></i> طباعة / Print</button>
+    <!-- The actual printable invoice -->
+    <div class="invoice-paper" id="invoice-print-area">
+      <div id="invoice-content"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Quick Receipt Modal (after checkout) -->
+<div class="modal-overlay" id="modal-receipt">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2><i class="fas fa-receipt"></i> تم البيع بنجاح!</h2>
+      <button onclick="closeModal('modal-receipt')"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div id="receipt-content"></div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-receipt')">إغلاق</button>
+      <button class="btn-primary" onclick="printReceipt()"><i class="fas fa-print"></i> طباعة الإيصال</button>
     </div>
   </div>
 </div>
