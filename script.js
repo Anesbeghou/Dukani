@@ -7,8 +7,14 @@ let cart = [];
 let selectedPayment = 'cash';
 let chartWeekly = null, chartProfit = null, chartReport = null;
 
-// ─── Boot ─────────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+// ─── License Gate ─────────────────────────────────────────────────────────────
+// فحص دوري كل 60 ثانية — يكشف انتهاء الصلاحية أثناء الاستخدام
+setInterval(() => {
+  if (!DakaniLicense.info()) DakaniLicense.gate();
+}, 60000);
+
+// ─── دالة تشغيل التطبيق ──────────────────────────────────────────────────────
+function _bootApp() {
   updateTopbarDate();
   setInterval(updateTopbarDate, 60000);
   navigateTo('dashboard');
@@ -17,6 +23,18 @@ document.addEventListener('DOMContentLoaded', () => {
     el.addEventListener('click', e => { e.preventDefault(); navigateTo(el.dataset.page); })
   );
   checkAlerts();
+}
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  // 1. فحص الترخيص أولاً — إذا لم يكن صالحاً يُوقف كل شيء
+  if (!DakaniLicense.gate()) {
+    // عند إدخال مفتاح صحيح لاحقاً يُشغّل التطبيق
+    window.addEventListener('dakani-licensed', _bootApp, { once: true });
+    return;
+  }
+  // 2. الترخيص صالح — شغّل التطبيق مباشرة
+  _bootApp();
 });
 
 function updateTopbarDate() {
@@ -463,11 +481,46 @@ function checkout() {
     paymentMethod: selectedPayment
   });
 
-  toast(`✓ تم البيع! الفاتورة ${sale.invoiceNo} – ربح: ${fmt(profit)} ${DB.Settings.get().currency||'دج'}`, 'success');
   clearCart();
   document.getElementById('pos-discount').value = 0;
   renderPOSProducts();
   checkAlerts();
+  showQuickReceipt(sale);
+}
+
+function showQuickReceipt(sale) {
+  const S = DB.Settings.get(); const cur = S.currency || 'دج';
+  const el = document.getElementById('receipt-content');
+  if (!el) { toast(`✓ تم البيع! ${sale.invoiceNo}`, 'success'); return; }
+  el.innerHTML = `
+    <div class="receipt-body">
+      <div class="receipt-success-icon"><i class="fas fa-circle-check"></i></div>
+      <div class="receipt-inv-no">${sale.invoiceNo}</div>
+      <div class="receipt-customer"><i class="fas fa-user"></i> ${sale.customerName}</div>
+      <div class="receipt-items">
+        ${sale.items.map(it => `<div class="receipt-item">
+          <span>${it.nameAr} × ${it.qty}</span>
+          <span>${fmt(it.total)} ${cur}</span>
+        </div>`).join('')}
+      </div>
+      ${sale.discount ? `<div class="receipt-disc">خصم ${sale.discount}% — −${fmt(sale.subtotal * sale.discount / 100)} ${cur}</div>` : ''}
+      <div class="receipt-total">
+        <span>الإجمالي</span>
+        <span>${fmt(sale.total)} ${cur}</span>
+      </div>
+      <div class="receipt-profit">ربح هذه الفاتورة: +${fmt(sale.profit)} ${cur}</div>
+      <div class="receipt-method"><span class="badge pay-${sale.paymentMethod}">${payLabel(sale.paymentMethod)}</span></div>
+    </div>`;
+  _currentInvoiceId = sale.id;
+  openModal('modal-receipt');
+}
+
+function printReceipt() {
+  closeModal('modal-receipt');
+  if (_currentInvoiceId) {
+    viewInvoice(_currentInvoiceId);
+    setTimeout(() => printInvoice(), 400);
+  }
 }
 
 // ─── Purchases ────────────────────────────────────────────────────────────────
@@ -596,51 +649,223 @@ function renderInvoices() {
   const S = DB.Settings.get(); const cur = S.currency || 'دج';
   const tbody = document.getElementById('invoices-body');
   if (!tbody) return;
+
   tbody.innerHTML = list.length ? list.map(s =>
     `<tr>
       <td><code>${s.invoiceNo}</code></td>
       <td>${s.customerName}</td>
-      <td>${fmt(s.total)} ${cur}</td>
+      <td><strong>${fmt(s.total)} ${cur}</strong></td>
       <td>${s.discount || 0}%</td>
       <td class="profit-cell">+${fmt(s.profit)} ${cur}</td>
       <td><span class="badge pay-${s.paymentMethod}">${payLabel(s.paymentMethod)}</span></td>
       <td>${fmtDate(s.date)}</td>
       <td><button class="btn-icon edit" onclick="viewInvoice('${s.id}')"><i class="fas fa-eye"></i></button></td>
+      <td><button class="btn-icon danger" onclick="deleteInvoice('${s.id}')"><i class="fas fa-trash"></i></button></td>
     </tr>`).join('')
-  : '<tr><td colspan="8" class="empty-td">لا توجد فواتير / No invoices</td></tr>';
+  : `<tr><td colspan="9" class="empty-td">لا توجد فواتير / No invoices</td></tr>`;
+
+  // Summary bar
+  const totalRev    = list.reduce((a,s) => a + s.total, 0);
+  const totalProfit = list.reduce((a,s) => a + s.profit, 0);
+  const bar = document.getElementById('inv-summary-bar');
+  if (bar && list.length) {
+    bar.innerHTML = `
+      <span><i class="fas fa-receipt"></i> ${list.length} فاتورة</span>
+      <span><i class="fas fa-sack-dollar"></i> الإجمالي: <strong>${fmt(totalRev)} ${cur}</strong></span>
+      <span class="profit-cell"><i class="fas fa-trending-up"></i> الأرباح: <strong>+${fmt(totalProfit)} ${cur}</strong></span>`;
+  } else if (bar) { bar.innerHTML = ''; }
 }
 
+// ─── current invoice id for delete-from-preview ───────────────────────────────
+let _currentInvoiceId = null;
+
 function viewInvoice(id) {
-  const s   = DB.Sales.byId(id);
+  const s = DB.Sales.byId(id);
   if (!s) return;
-  const S   = DB.Settings.get(); const cur = S.currency || 'دج';
-  const el  = document.getElementById('invoice-content');
-  el.innerHTML = `
-    <div class="invoice-view">
-      <div class="inv-header">
-        <div class="inv-store"><h2>${S.storeName || 'دكاني'}</h2><p>${S.address || ''}</p><p>${S.phone || ''}</p></div>
-        <div class="inv-meta">
-          <div class="inv-no">${s.invoiceNo}</div>
-          <div class="inv-date">${fmtDate(s.date)}</div>
-          <div class="inv-pay"><span class="badge pay-${s.paymentMethod}">${payLabel(s.paymentMethod)}</span></div>
-        </div>
-      </div>
-      <div class="inv-customer">
-        <strong>الزبون / Customer:</strong> ${s.customerName}
-      </div>
-      <table class="inv-table">
-        <thead><tr><th>#</th><th>المنتج / Product</th><th>سعر الوحدة</th><th>الكمية</th><th>الإجمالي</th></tr></thead>
-        <tbody>
-          ${s.items.map((it, i) => `<tr><td>${i+1}</td><td>${it.nameAr}</td><td>${fmt(it.price)} ${cur}</td><td>${it.qty}</td><td>${fmt(it.total)} ${cur}</td></tr>`).join('')}
-        </tbody>
-      </table>
-      <div class="inv-totals">
-        <div class="inv-total-row"><span>المجموع / Subtotal</span><span>${fmt(s.subtotal)} ${cur}</span></div>
-        ${s.discount ? `<div class="inv-total-row"><span>خصم / Discount</span><span>−${s.discount}%</span></div>` : ''}
-        <div class="inv-total-row grand"><span>الإجمالي / Total</span><span>${fmt(s.total)} ${cur}</span></div>
-      </div>
-    </div>`;
+  _currentInvoiceId = id;
+  const S  = DB.Settings.get();
+  const cur = S.currency || 'دج';
+
+  // Sidebar meta
+  const meta = document.getElementById('inv-ctrl-meta');
+  if (meta) meta.innerHTML = `
+    <div class="inv-meta-chip"><i class="fas fa-hashtag"></i> ${s.invoiceNo}</div>
+    <div class="inv-meta-chip"><i class="fas fa-user"></i> ${s.customerName}</div>
+    <div class="inv-meta-chip pay-${s.paymentMethod}"><i class="fas fa-wallet"></i> ${payLabel(s.paymentMethod)}</div>
+    <div class="inv-meta-chip total-chip"><i class="fas fa-coins"></i> ${fmt(s.total)} ${cur}</div>`;
+
+  // Printable invoice content
+  const el = document.getElementById('invoice-content');
+  el.innerHTML = buildInvoiceHTML(s, S, cur);
   openModal('modal-invoice');
+}
+
+function buildInvoiceHTML(s, S, cur) {
+  const logoIcon = `<div class="inv-logo-icon"><i class="fas fa-store"></i></div>`;
+  const itemsRows = s.items.map((it, i) => `
+    <tr>
+      <td class="inv-td-num">${i + 1}</td>
+      <td class="inv-td-name">${it.nameAr}${it.nameEn ? `<span class="inv-en">${it.nameEn}</span>` : ''}</td>
+      <td class="inv-td-r">${fmt(it.price)}</td>
+      <td class="inv-td-r">${it.qty}</td>
+      <td class="inv-td-r inv-td-total">${fmt(it.total)}</td>
+    </tr>`).join('');
+
+  return `
+  <div class="inv-paper-inner">
+    <div class="inv-paper-header">
+      ${logoIcon}
+      <div class="inv-paper-store">
+        <h1 class="inv-store-name">${S.storeName || 'دكاني'}</h1>
+        ${S.address ? `<p class="inv-store-sub">${S.address}</p>` : ''}
+        ${S.phone   ? `<p class="inv-store-sub"><i class="fas fa-phone"></i> ${S.phone}</p>` : ''}
+      </div>
+      <div class="inv-paper-meta">
+        <div class="inv-badge-no">${s.invoiceNo}</div>
+        <div class="inv-paper-date">${new Date(s.date).toLocaleDateString('ar-DZ', {year:'numeric',month:'long',day:'numeric'})}</div>
+        <div class="inv-paper-time">${new Date(s.date).toLocaleTimeString('ar-DZ', {hour:'2-digit',minute:'2-digit'})}</div>
+      </div>
+    </div>
+
+    <div class="inv-divider"></div>
+
+    <div class="inv-paper-customer">
+      <span class="inv-cust-label"><i class="fas fa-user-circle"></i> الزبون</span>
+      <span class="inv-cust-name">${s.customerName}</span>
+      <span class="inv-pay-badge pay-${s.paymentMethod}">${payLabel(s.paymentMethod)}</span>
+    </div>
+
+    <table class="inv-paper-table">
+      <thead>
+        <tr>
+          <th class="inv-td-num">#</th>
+          <th>المنتج</th>
+          <th class="inv-td-r">السعر (${cur})</th>
+          <th class="inv-td-r">الكمية</th>
+          <th class="inv-td-r">الإجمالي (${cur})</th>
+        </tr>
+      </thead>
+      <tbody>${itemsRows}</tbody>
+    </table>
+
+    <div class="inv-paper-totals">
+      <div class="inv-tot-row">
+        <span>المجموع الفرعي</span>
+        <span>${fmt(s.subtotal)} ${cur}</span>
+      </div>
+      ${s.discount ? `<div class="inv-tot-row discount">
+        <span>خصم (${s.discount}%)</span>
+        <span>− ${fmt(s.subtotal * s.discount / 100)} ${cur}</span>
+      </div>` : ''}
+      <div class="inv-tot-row grand-total">
+        <span>الإجمالي النهائي</span>
+        <span>${fmt(s.total)} ${cur}</span>
+      </div>
+    </div>
+
+    <div class="inv-paper-footer">
+      <div class="inv-barcode-line">${s.invoiceNo}</div>
+      <p class="inv-footer-thanks">شكراً لتعاملكم معنا • دكاني POS</p>
+    </div>
+  </div>`;
+}
+
+function handleInvoiceOverlayClick(e) {
+  if (e.target === document.getElementById('modal-invoice')) closeModal('modal-invoice');
+}
+
+function deleteInvoice(id) {
+  if (!confirm('⚠️ حذف هذه الفاتورة؟ سيتم استعادة المخزون / Delete invoice? Stock will be restored.')) return;
+  DB.Sales.delete(id);
+  renderInvoices();
+  checkAlerts();
+  toast('تم حذف الفاتورة واستعادة المخزون / Invoice deleted, stock restored', 'info');
+}
+
+function deleteCurrentInvoice() {
+  if (!_currentInvoiceId) return;
+  deleteInvoice(_currentInvoiceId);
+  closeModal('modal-invoice');
+  _currentInvoiceId = null;
+}
+
+function printInvoice() {
+  const content = document.getElementById('invoice-print-area')?.innerHTML;
+  if (!content) return;
+
+  // جلب CSS الخاص بالفاتورة فقط
+  const styles = `
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700;900&display=swap');
+    @import url('https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css');
+
+    @page { margin: 12mm; size: A4 portrait; }
+    * { box-sizing: border-box; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+    body { margin: 0; padding: 0; background: #fff; font-family: 'Cairo', sans-serif; direction: rtl; }
+
+    .inv-paper-inner { background:#fff; border-radius:12px; padding:28px 24px; max-width:100%; margin:0 auto; font-family:'Cairo',sans-serif; color:#111827; }
+    .inv-paper-header { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:20px; }
+    .inv-logo-icon { width:52px; height:52px; background:#059669 !important; border-radius:12px; display:flex; align-items:center; justify-content:center; color:#fff; font-size:24px; flex-shrink:0; }
+    .inv-paper-store { flex:1; padding:0 14px; }
+    .inv-store-name { font-size:20px; font-weight:900; margin:0 0 4px; color:#111827; }
+    .inv-store-sub { font-size:12px; color:#6b7280; margin:2px 0; display:flex; align-items:center; gap:4px; }
+    .inv-paper-meta { text-align:left; }
+    .inv-badge-no { background:#1f2937 !important; color:#10b981 !important; border-radius:8px; padding:6px 12px; font-size:13px; font-weight:900; letter-spacing:1px; font-family:monospace; margin-bottom:6px; text-align:center; }
+    .inv-paper-date { font-size:12px; color:#6b7280; text-align:center; }
+    .inv-paper-time { font-size:11px; color:#9ca3af; text-align:center; }
+    .inv-divider { height:1px; background:#e5e7eb; margin:16px 0; }
+    .inv-paper-customer { display:flex; align-items:center; gap:10px; flex-wrap:wrap; background:#f8fafc !important; border-radius:8px; padding:10px 14px; margin-bottom:16px; }
+    .inv-cust-label { font-size:12px; color:#9ca3af; }
+    .inv-cust-name { font-size:15px; font-weight:700; color:#111827; flex:1; }
+    .inv-pay-badge { border-radius:6px; padding:4px 10px; font-size:12px; font-weight:700; }
+    .inv-pay-badge.pay-cash   { background:#dcfce7 !important; color:#059669 !important; }
+    .inv-pay-badge.pay-card   { background:#dbeafe !important; color:#2563eb !important; }
+    .inv-pay-badge.pay-credit { background:#fef3c7 !important; color:#d97706 !important; }
+    .inv-paper-table { width:100%; border-collapse:collapse; font-size:13px; margin-bottom:20px; }
+    .inv-paper-table th { background:#f8fafc !important; padding:10px; font-weight:700; color:#374151; border-bottom:2px solid #e5e7eb; font-size:12px; }
+    .inv-paper-table td { padding:10px; border-bottom:1px solid #f1f5f9; vertical-align:middle; }
+    .inv-td-num { text-align:center; color:#9ca3af; font-size:12px; width:32px; }
+    .inv-td-name { color:#111827; font-weight:600; }
+    .inv-en { display:block; font-size:11px; color:#9ca3af; font-weight:400; }
+    .inv-td-r { text-align:center; color:#374151; }
+    .inv-td-total { font-weight:700; color:#059669 !important; }
+    .inv-paper-totals { background:#f8fafc !important; border-radius:10px; padding:14px 16px; margin-bottom:20px; }
+    .inv-tot-row { display:flex; justify-content:space-between; align-items:center; padding:6px 0; font-size:14px; color:#374151; border-bottom:1px solid #f1f5f9; }
+    .inv-tot-row:last-child { border-bottom:none; }
+    .inv-tot-row.discount { color:#ef4444; }
+    .inv-tot-row.grand-total { font-size:18px; font-weight:900; color:#059669 !important; border-top:2px dashed #e5e7eb; padding-top:12px; margin-top:4px; }
+    .inv-paper-footer { text-align:center; padding-top:16px; border-top:1px dashed #e5e7eb; }
+    .inv-barcode-line { font-family:monospace; font-size:11px; color:#9ca3af; letter-spacing:3px; margin-bottom:8px; }
+    .inv-footer-thanks { font-size:13px; color:#6b7280; margin:0; }
+  `;
+
+  const win = window.open('', '_blank', 'width=794,height=1123');
+  win.document.write(`<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <title>فاتورة</title>
+  <style>${styles}</style>
+</head>
+<body>${content}</body>
+</html>`);
+  win.document.close();
+  win.focus();
+  setTimeout(() => { win.print(); win.close(); }, 600);
+}
+
+function shareInvoiceWhatsApp() {
+  const s = _currentInvoiceId ? DB.Sales.byId(_currentInvoiceId) : null;
+  if (!s) return;
+  const S = DB.Settings.get(); const cur = S.currency || 'دج';
+  let msg = `🧾 *فاتورة ${s.invoiceNo}*\n`;
+  msg += `📅 ${new Date(s.date).toLocaleDateString('ar-DZ')}\n`;
+  msg += `👤 ${s.customerName}\n\n`;
+  s.items.forEach((it,i) => { msg += `${i+1}. ${it.nameAr} × ${it.qty} = ${fmt(it.total)} ${cur}\n`; });
+  msg += `\n━━━━━━━━━━━━\n`;
+  if (s.discount) msg += `خصم: ${s.discount}%\n`;
+  msg += `*الإجمالي: ${fmt(s.total)} ${cur}*\n\n`;
+  msg += `${S.storeName || 'دكاني'} — شكراً لتعاملكم 🙏`;
+  window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank');
 }
 
 // ─── Reports ──────────────────────────────────────────────────────────────────
@@ -846,6 +1071,7 @@ function toast(msg, type = 'info') {
   document.getElementById('toast-container').appendChild(el);
   setTimeout(() => { el.classList.add('fade-out'); setTimeout(() => el.remove(), 400); }, 3500);
 }
+
 
 // ─── تسجيل نظام العمل دون اتصال الديناميكي (Dakani PWA Active) ───────────────
 if ('serviceWorker' in navigator) {
