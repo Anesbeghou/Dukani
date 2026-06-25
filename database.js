@@ -294,6 +294,25 @@ const DB = (() => {
       });
       return Object.values(map).sort((a, b) => b.qty - a.qty).slice(0, limit);
     },
+    delete: id => {
+      const sale = read('sales').find(s => s.id === id);
+      if (!sale) return;
+      // Restore stock for each item
+      (sale.items || []).forEach(it => Products.adjustStock(it.productId, it.qty));
+      // Remove flat sale_items
+      write('sale_items', read('sale_items').filter(i => i.saleId !== id));
+      // Update customer totals if applicable
+      if (sale.customerId) {
+        const custs = read('customers');
+        const ci = custs.findIndex(c => c.id === sale.customerId);
+        if (ci >= 0) {
+          custs[ci].totalBought = Math.max(0, (custs[ci].totalBought || 0) - sale.total);
+          if (sale.paymentMethod === 'credit') custs[ci].debt = Math.max(0, (custs[ci].debt || 0) - sale.total);
+          write('customers', custs);
+        }
+      }
+      write('sales', read('sales').filter(s => s.id !== id));
+    },
     weeklySales: () => {
       const days = [];
       for (let i = 6; i >= 0; i--) {
