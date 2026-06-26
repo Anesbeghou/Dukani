@@ -1,5 +1,5 @@
 const CACHE_NAME = 'dakani-pos';
-
+ي
 const ASSETS = [
     './',
     './index.html',
