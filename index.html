@@ -42,6 +42,11 @@
       <span class="nav-ar">المشتريات</span>
       <span class="nav-en">Purchases</span>
     </a>
+    <a href="#" class="nav-item" data-page="suppliers">
+      <i class="fas fa-truck"></i>
+      <span class="nav-ar">الموردون</span>
+      <span class="nav-en">Suppliers</span>
+    </a>
     <a href="#" class="nav-item" data-page="customers">
       <i class="fas fa-users"></i>
       <span class="nav-ar">الزبائن</span>
@@ -287,24 +292,64 @@
     </div>
   </div>
 
+  <!-- ===== SUPPLIERS PAGE ===== -->
+  <div class="page" id="page-suppliers">
+    <div class="page-header">
+      <h1>الموردون <span>Suppliers</span></h1>
+      <button class="btn-primary" onclick="openSupplierModal()">
+        <i class="fas fa-plus"></i> إضافة مورد
+      </button>
+    </div>
+    <div class="filter-bar">
+      <input type="text" id="supp-search" placeholder="بحث عن مورد..." oninput="renderSuppliers()"/>
+    </div>
+    <!-- بطاقات إحصاء الموردين -->
+    <div class="kpi-grid" id="supp-kpi-grid" style="margin-bottom:20px"></div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr>
+          <th>#</th>
+          <th>اسم المورد</th>
+          <th>الهاتف</th>
+          <th>العنوان</th>
+          <th>إجمالي المشتريات</th>
+          <th>عدد الطلبات</th>
+          <th>آخر طلب</th>
+          <th>إجراءات</th>
+        </tr></thead>
+        <tbody id="suppliers-body"></tbody>
+      </table>
+    </div>
+    <div class="inv-summary-bar" id="supp-summary-bar"></div>
+  </div>
+
   <!-- ===== CUSTOMERS PAGE ===== -->
   <div class="page" id="page-customers">
     <div class="page-header">
       <h1>الزبائن <span>Customers</span></h1>
-      <button class="btn-primary" onclick="openModal('modal-customer')"><i class="fas fa-plus"></i> إضافة زبون / Add Customer</button>
+      <button class="btn-primary" onclick="openModal('modal-customer')"><i class="fas fa-plus"></i> إضافة زبون</button>
     </div>
+    <!-- KPI ديون سريع -->
+    <div class="kpi-grid" id="cust-kpi-grid" style="margin-bottom:20px"></div>
     <div class="filter-bar">
-      <input type="text" placeholder="بحث عن زبون..." id="cust-search" oninput="renderCustomers()"/>
+      <input type="text" placeholder="بحث بالاسم أو الهاتف..." id="cust-search" oninput="renderCustomers()"/>
+      <select id="cust-debt-filter" onchange="renderCustomers()">
+        <option value="">كل الزبائن</option>
+        <option value="debt">لديهم ديون</option>
+        <option value="clear">مسدّدون</option>
+      </select>
+      <button class="btn-secondary" onclick="renderCustomers()"><i class="fas fa-filter"></i></button>
     </div>
     <div class="table-wrap">
       <table class="data-table">
         <thead><tr>
-          <th>#</th><th>الاسم / Name</th><th>الهاتف / Phone</th>
-          <th>العنوان / Address</th><th>الديون / Debt</th><th>مجموع الشراء / Total Bought</th><th>إجراءات</th>
+          <th>#</th><th>الاسم</th><th>الهاتف</th>
+          <th>الدين المتبقي</th><th>مجموع الشراء</th><th>آخر سداد</th><th>إجراءات</th>
         </tr></thead>
         <tbody id="customers-body"></tbody>
       </table>
     </div>
+    <div class="inv-summary-bar" id="cust-summary-bar"></div>
   </div>
 
   <!-- ===== INVOICES PAGE ===== -->
@@ -460,7 +505,7 @@
         </div>
         <div class="form-group">
           <label>الفئة / Category</label>
-          <select id="prod-cat"></select>
+          <select id="prod-cat" onchange="toggleWeightFields()"></select>
         </div>
       </div>
       <div class="form-row">
@@ -493,6 +538,13 @@
           <option value="كيس">كيس / Bag</option>
         </select>
       </div>
+      <!-- hint for weighable products -->
+      <div id="weight-hint" style="display:none;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:10px 14px;margin-top:4px;">
+        <span style="color:#10b981;font-size:13px;"><i class="fas fa-scale-balanced"></i>
+          هذا المنتج <strong>يُباع بالميزان</strong> — سعر الشراء والبيع يمثلان <strong>سعر الكيلوغرام الواحد</strong>.<br>
+          المخزون يُدخَل بالكيلوغرام. عند البيع يمكن إدخال مبلغ نقدي، وزن بالغرام، أو وزن بالكيلو.
+        </span>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeModal('modal-product')">إلغاء / Cancel</button>
@@ -517,7 +569,14 @@
         </div>
         <div class="form-group">
           <label>المورد / Supplier</label>
-          <input type="text" id="purch-supplier" placeholder="اسم المورد..."/>
+          <div style="display:flex;gap:6px">
+            <select id="purch-supplier" style="flex:1">
+              <option value="">— بدون مورد —</option>
+            </select>
+            <button type="button" class="btn-secondary" style="white-space:nowrap;padding:8px 10px" onclick="openSupplierModal()" title="إضافة مورد جديد">
+              <i class="fas fa-plus"></i>
+            </button>
+          </div>
         </div>
       </div>
       <div class="form-row">
@@ -547,6 +606,65 @@
 </div>
 
 <!-- Customer Modal -->
+<!-- ── Debt Payment Modal ── -->
+<div class="modal-overlay" id="modal-debt-pay">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2><i class="fas fa-hand-holding-dollar"></i> تسديد دين / Pay Debt</h2>
+      <button onclick="closeModal('modal-debt-pay')"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="debt-cust-id"/>
+      <!-- معلومات الدين الحالي -->
+      <div id="debt-cust-info" class="debt-info-box"></div>
+      <div class="debt-quick-btns" id="debt-quick-btns"></div>
+      <div class="form-group" style="margin-top:14px">
+        <label>مبلغ السداد <span class="req">*</span></label>
+        <div class="debt-amount-wrap">
+          <input type="number" id="debt-amount" placeholder="0.00" step="0.01" min="0.01" oninput="updateDebtPreview()"/>
+          <button class="btn-secondary" onclick="payFullDebt()" style="white-space:nowrap">
+            <i class="fas fa-check-double"></i> سداد كامل
+          </button>
+        </div>
+      </div>
+      <!-- معاينة الدين المتبقي بعد السداد -->
+      <div id="debt-preview" class="debt-preview" style="display:none"></div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>تاريخ السداد</label>
+          <input type="date" id="debt-date"/>
+        </div>
+        <div class="form-group">
+          <label>ملاحظة</label>
+          <input type="text" id="debt-note" placeholder="نقدي، تحويل بنكي..."/>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-debt-pay')">إلغاء</button>
+      <button class="btn-primary" onclick="saveDebtPayment()">
+        <i class="fas fa-check"></i> تأكيد السداد
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Customer Statement Modal (كشف حساب) ── -->
+<div class="modal-overlay" id="modal-cust-statement">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h2 id="stmt-title"><i class="fas fa-file-invoice-dollar"></i> كشف حساب الزبون</h2>
+      <button onclick="closeModal('modal-cust-statement')"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-body" id="stmt-body"></div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-cust-statement')">إغلاق</button>
+      <button class="btn-primary" onclick="printStatement()"><i class="fas fa-print"></i> طباعة الكشف</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Customer Modal ── -->
 <div class="modal-overlay" id="modal-customer">
   <div class="modal">
     <div class="modal-header">
@@ -624,6 +742,114 @@
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeModal('modal-receipt')">إغلاق</button>
       <button class="btn-primary" onclick="printReceipt()"><i class="fas fa-print"></i> طباعة الإيصال</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Supplier Modal (Add / Edit) ── -->
+<div class="modal-overlay" id="modal-supplier">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="supp-modal-title"><i class="fas fa-truck"></i> إضافة مورد / Add Supplier</h2>
+      <button onclick="closeModal('modal-supplier')"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="supp-id"/>
+      <div class="form-row">
+        <div class="form-group">
+          <label>اسم المورد <span class="req">*</span></label>
+          <input type="text" id="supp-name" placeholder="اسم الشركة أو الشخص..."/>
+        </div>
+        <div class="form-group">
+          <label>رقم الهاتف</label>
+          <input type="text" id="supp-phone" placeholder="0xxx xxx xxx"/>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>الولاية / المدينة</label>
+          <input type="text" id="supp-city" placeholder="سطيف، الجزائر..."/>
+        </div>
+        <div class="form-group">
+          <label>البريد الإلكتروني</label>
+          <input type="email" id="supp-email" placeholder="email@example.com"/>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>العنوان الكامل</label>
+        <input type="text" id="supp-address" placeholder="الشارع، الحي..."/>
+      </div>
+      <div class="form-group">
+        <label>المنتجات التي يورّدها</label>
+        <input type="text" id="supp-products" placeholder="مشروبات، منظفات... (اختياري)"/>
+      </div>
+      <div class="form-group">
+        <label>ملاحظات</label>
+        <textarea id="supp-notes" rows="2" placeholder="شروط الدفع، أوقات التوصيل..."></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-supplier')">إلغاء</button>
+      <button class="btn-primary" onclick="saveSupplier()"><i class="fas fa-save"></i> حفظ</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Supplier Detail Modal ── -->
+<div class="modal-overlay" id="modal-supplier-detail">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h2 id="supp-detail-title"><i class="fas fa-truck"></i> تفاصيل المورد</h2>
+      <button onclick="closeModal('modal-supplier-detail')"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-body" id="supp-detail-body"></div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-supplier-detail')">إغلاق</button>
+      <button class="btn-primary" id="supp-detail-edit-btn"><i class="fas fa-edit"></i> تعديل</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ⚖️ Weight Input Modal — for "ميزان" products -->
+<div class="modal-overlay" id="modal-weight-input">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2><i class="fas fa-scale-balanced"></i> إدخال الوزن / Weight Entry</h2>
+      <button onclick="closeModal('modal-weight-input')"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-body">
+      <div style="text-align:center;margin-bottom:16px;">
+        <div id="wi-prod-name" style="font-size:16px;font-weight:700;color:var(--text1)"></div>
+        <div id="wi-price-kg" style="font-size:13px;color:var(--text2);margin-top:4px;"></div>
+      </div>
+      <!-- اختيار طريقة الإدخال -->
+      <div style="display:flex;gap:8px;margin-bottom:16px;">
+        <button class="wi-mode-btn active" id="wi-btn-amount" onclick="setWeightMode('amount')">
+          <i class="fas fa-coins"></i><br/>بالمبلغ
+        </button>
+        <button class="wi-mode-btn" id="wi-btn-grams" onclick="setWeightMode('grams')">
+          <i class="fas fa-weight-hanging"></i><br/>بالغرام
+        </button>
+        <button class="wi-mode-btn" id="wi-btn-kg" onclick="setWeightMode('kg')">
+          <i class="fas fa-scale-balanced"></i><br/>بالكيلو
+        </button>
+      </div>
+      <!-- حقل الإدخال -->
+      <div class="form-group">
+        <label id="wi-input-label">المبلغ المدفوع / Amount Paid</label>
+        <input type="number" id="wi-value" placeholder="0" step="0.01" min="0" oninput="calcWeightResult()"/>
+      </div>
+      <!-- النتيجة -->
+      <div id="wi-result-box" style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:12px 16px;text-align:center;min-height:60px;">
+        <div id="wi-result-text" style="color:#10b981;font-size:14px;font-weight:600;"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-weight-input')">إلغاء / Cancel</button>
+      <button class="btn-primary" id="wi-confirm-btn" onclick="confirmWeightAdd()">
+        <i class="fas fa-cart-plus"></i> إضافة للسلة / Add to Cart
+      </button>
     </div>
   </div>
 </div>
