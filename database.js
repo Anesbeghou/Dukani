@@ -17,7 +17,9 @@ const DB = (() => {
     customers: [],
     sales: [],
     sale_items: [],
-    purchases: []
+    purchases: [],
+    suppliers: [],
+    debt_payments: []
   };
 
   // ─── IndexedDB Core ─────────────────────────────────────────────────────────
@@ -156,13 +158,23 @@ const DB = (() => {
   // ─── Seed defaults ──────────────────────────────────────────────────────────
   function seed() {
     if (!read('seeded').length) {
-      const cats = ['مواد غذائية','مشروبات','منظفات','مخبوزات','ألبان','تحلية','أخرى'];
+      const cats = ['مواد غذائية','مشروبات','منظفات','مخبوزات','ألبان','تحلية','بالميزان','أخرى'];
       write('categories', cats.map(n => ({ id: uid(), name: n })));
       write('settings', {
         storeName: 'دكاني', address: '', phone: '',
         currency: 'دج', lowStockThreshold: 5
       });
       write('seeded', [1]);
+    }
+    ensureWeightCategory();
+  }
+
+  // ─── Migration: ensure بالميزان category exists ────────────────────────────
+  function ensureWeightCategory() {
+    const cats = read('categories');
+    if (!cats.find(c => c.name === 'بالميزان')) {
+      cats.push({ id: uid(), name: 'بالميزان' });
+      write('categories', cats);
     }
   }
 
@@ -240,7 +252,50 @@ const DB = (() => {
       const i = list.findIndex(c => c.id === id);
       if (i > -1) { list[i].totalBought = (list[i].totalBought || 0) + amount; write('customers', list); }
     },
+    payDebt: (id, amount) => {
+      const list = read('customers');
+      const i = list.findIndex(c => c.id === id);
+      if (i > -1) {
+        list[i].debt = Math.max(0, (list[i].debt || 0) - amount);
+        list[i].lastPayment = now();
+        write('customers', list);
+      }
+    },
     delete: id => write('customers', read('customers').filter(c => c.id !== id))
+  };
+
+  // ─── DEBT PAYMENTS ──────────────────────────────────────────────────────────
+  const DebtPayments = {
+    all:        ()  => read('debt_payments'),
+    byCustomer: id  => read('debt_payments').filter(p => p.customerId === id),
+    add: (customerId, amount, note, date) => {
+      const c = Customers.byId(customerId);
+      if (!c) return null;
+      const maxPay = c.debt || 0;
+      const paid   = Math.min(amount, maxPay);   // لا يتجاوز الدين الفعلي
+      const list   = read('debt_payments');
+      const payment = {
+        id: uid(), customerId,
+        customerName: c.name,
+        amount: paid,
+        note:   note || '',
+        date:   date || now(),
+        createdAt: now()
+      };
+      list.push(payment);
+      write('debt_payments', list);
+      Customers.payDebt(customerId, paid);
+      return payment;
+    },
+    delete: id => {
+      const p = read('debt_payments').find(p => p.id === id);
+      if (!p) return;
+      // إلغاء السداد — يُعيد الدين للزبون
+      const list = read('customers');
+      const i    = list.findIndex(c => c.id === p.customerId);
+      if (i > -1) { list[i].debt = (list[i].debt || 0) + p.amount; write('customers', list); }
+      write('debt_payments', read('debt_payments').filter(d => d.id !== id));
+    }
   };
 
   // ─── SALES ──────────────────────────────────────────────────────────────────
@@ -329,6 +384,50 @@ const DB = (() => {
     }
   };
 
+  // ─── SUPPLIERS ──────────────────────────────────────────────
+  const Suppliers = {
+    all:   () => read('suppliers'),
+    byId:  id  => read('suppliers').find(s => s.id === id),
+    byName: n  => read('suppliers').find(s => s.name === n),
+    save: data => {
+      const list = read('suppliers');
+      if (data.id) {
+        const i = list.findIndex(s => s.id === data.id);
+        if (i > -1) {
+          list[i] = { ...list[i], ...data, updatedAt: now() };
+          write('suppliers', list); return list[i];
+        }
+      }
+      const supp = {
+        ...data, id: uid(),
+        totalPurchased: 0, orderCount: 0,
+        createdAt: now(), updatedAt: now()
+      };
+      list.push(supp); write('suppliers', list); return supp;
+    },
+    // يُحدَّث تلقائياً عند حفظ مشترى
+    updateStats: (id, amount) => {
+      const list = read('suppliers');
+      const i    = list.findIndex(s => s.id === id);
+      if (i > -1) {
+        list[i].totalPurchased = (list[i].totalPurchased || 0) + amount;
+        list[i].orderCount     = (list[i].orderCount     || 0) + 1;
+        list[i].lastOrder      = now();
+        write('suppliers', list);
+      }
+    },
+    revertStats: (id, amount) => {
+      const list = read('suppliers');
+      const i    = list.findIndex(s => s.id === id);
+      if (i > -1) {
+        list[i].totalPurchased = Math.max(0, (list[i].totalPurchased || 0) - amount);
+        list[i].orderCount     = Math.max(0, (list[i].orderCount     || 0) - 1);
+        write('suppliers', list);
+      }
+    },
+    delete: id => write('suppliers', read('suppliers').filter(s => s.id !== id))
+  };
+
   // ─── PURCHASES ──────────────────────────────────────────────────────────────
   const Purchases = {
     all:  () => read('purchases'),
@@ -338,11 +437,16 @@ const DB = (() => {
       const purchase = { ...data, id: uid(), createdAt: now() };
       list.push(purchase); write('purchases', list);
       Products.adjustStock(data.productId, data.qty);
+      // تحديث إحصائيات المورد
+      if (data.supplierId) Suppliers.updateStats(data.supplierId, data.qty * data.unitPrice);
       return purchase;
     },
     delete: id => {
       const p = read('purchases').find(p => p.id === id);
-      if (p) Products.adjustStock(p.productId, -p.qty);
+      if (p) {
+        Products.adjustStock(p.productId, -p.qty);
+        if (p.supplierId) Suppliers.revertStats(p.supplierId, p.qty * p.unitPrice);
+      }
       write('purchases', read('purchases').filter(p => p.id !== id));
     }
   };
@@ -354,6 +458,8 @@ const DB = (() => {
       products: read('products'), categories: read('categories'),
       customers: read('customers'), sales: read('sales'),
       sale_items: read('sale_items'), purchases: read('purchases'),
+      suppliers: read('suppliers'),
+      debt_payments: read('debt_payments'),
       settings: Settings.get()
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -376,7 +482,9 @@ const DB = (() => {
         if (data.sales)      write('sales', data.sales);
         if (data.sale_items) write('sale_items', data.sale_items);
         if (data.purchases)  write('purchases', data.purchases);
-        if (data.settings)   write('settings', data.settings);
+        if (data.suppliers)     write('suppliers',     data.suppliers);
+        if (data.debt_payments) write('debt_payments', data.debt_payments);
+        if (data.settings)      write('settings',      data.settings);
         if (typeof toast === 'function') toast('تم الاستيراد بنجاح! جارٍ إعادة التحميل... / Import success!', 'success');
         setTimeout(() => location.reload(), 1500);
       } catch { if (typeof toast === 'function') toast('ملف غير صالح / Invalid file', 'error'); }
@@ -396,10 +504,12 @@ const DB = (() => {
       customers: read('customers').length,
       sales:     read('sales').length,
       purchases: read('purchases').length,
+      suppliers: read('suppliers').length,
       size:      (new Blob([JSON.stringify(cache)]).size / 1024).toFixed(1) + ' KB'
     };
   }
 
-  return { Settings, Categories, Products, Customers, Sales, Purchases,
+  return { Settings, Categories, Products, Suppliers, Customers,
+           DebtPayments, Sales, Purchases,
            exportData, importData, resetAll, stats, uid, today, now };
 })();
