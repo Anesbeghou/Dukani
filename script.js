@@ -55,6 +55,8 @@ const PAGE_TITLES = {
   suppliers: 'الموردون / Suppliers',
   customers: 'الزبائن / Customers',
   invoices:  'الفواتير / Invoices',
+  returns:   'المرتجعات / Returns & Refunds',
+  inventory: 'تسوية المخزون / Inventory',
   reports:   'التقارير / Reports',
   settings:  'الإعدادات / Settings'
 };
@@ -70,7 +72,8 @@ function navigateTo(page) {
   const handlers = {
     dashboard: loadDashboard, products: renderProducts, sell: loadPOS,
     purchases: renderPurchases, suppliers: renderSuppliers, customers: renderCustomers,
-    invoices: renderInvoices, reports: initReports, settings: loadSettings
+    invoices: renderInvoices, returns: renderReturns, reports: initReports,
+    settings: loadSettings, inventory: renderInventory
   };
   if (handlers[page]) handlers[page]();
   if (window.innerWidth < 900) document.getElementById('sidebar').classList.remove('open');
@@ -396,7 +399,23 @@ function populatePOSCustomers() {
   const sel = document.getElementById('pos-customer');
   if (!sel) return;
   sel.innerHTML = '<option value="">زبون عام / Walk-in</option>' +
-    DB.Customers.all().map(c => `<option value="${c.id}">${c.name} – ${c.phone||''}</option>`).join('');
+    DB.Customers.all().map(c => {
+      const debtLabel = (c.debt||0) > 0 ? ` ⚠️ دين: ${fmt(c.debt)} دج` : '';
+      return `<option value="${c.id}">${c.name}${c.phone ? ' – ' + c.phone : ''}${debtLabel}</option>`;
+    }).join('');
+}
+
+function posCustomerChanged() {
+  const custId = document.getElementById('pos-customer')?.value || '';
+  const banner = document.getElementById('pos-debt-banner');
+  if (!banner) return;
+  if (!custId) { banner.style.display = 'none'; return; }
+  const cust = DB.Customers.byId(custId);
+  if (!cust || !(cust.debt > 0)) { banner.style.display = 'none'; return; }
+  const S = DB.Settings.get(); const cur = S.currency || 'دج';
+  document.getElementById('pos-debt-label').textContent = `⚠️ ${cust.name} لديه دين غير مسدَّد`;
+  document.getElementById('pos-debt-amount').textContent = `الدين الحالي: ${fmt(cust.debt)} ${cur} — البيع الآجل سيزيد هذا الدين`;
+  banner.style.display = 'flex';
 }
 
 // ─── Weight modal state ───────────────────────────────────────────────────────
@@ -611,6 +630,25 @@ function checkout() {
   const custId     = document.getElementById('pos-customer')?.value || '';
   const cust       = custId ? DB.Customers.byId(custId) : null;
 
+  // ⚠️ تحذير: بيع آجل لزبون عليه دين
+  if (selectedPayment === 'credit') {
+    if (!custId) {
+      toast('⚠️ البيع الآجل يتطلب تحديد زبون / Credit sale requires a customer', 'error');
+      return;
+    }
+    if (cust && (cust.debt || 0) > 0) {
+      const S = DB.Settings.get(); const cur = S.currency || 'دج';
+      const newDebt = (cust.debt || 0) + total;
+      if (!confirm(
+        `⚠️ تحذير — ${cust.name} لديه دين غير مسدَّد!\n\n` +
+        `الدين الحالي: ${fmt(cust.debt)} ${cur}\n` +
+        `قيمة هذه الفاتورة: ${fmt(total)} ${cur}\n` +
+        `الدين الجديد بعد البيع: ${fmt(newDebt)} ${cur}\n\n` +
+        `هل تريد المتابعة وإضافة دين جديد؟`
+      )) return;
+    }
+  }
+
   const sale = DB.Sales.create({
     customerId: custId || null, customerName: cust ? cust.name : 'زبون عام',
     items: [...cart], subtotal, discount: disc, total, profit,
@@ -619,6 +657,7 @@ function checkout() {
 
   clearCart();
   document.getElementById('pos-discount').value = 0;
+  document.getElementById('pos-debt-banner').style.display = 'none';
   renderPOSProducts();
   checkAlerts();
   showQuickReceipt(sale);
@@ -646,6 +685,18 @@ function showQuickReceipt(sale) {
       </div>
       <div class="receipt-profit">ربح هذه الفاتورة: +${fmt(sale.profit)} ${cur}</div>
       <div class="receipt-method"><span class="badge pay-${sale.paymentMethod}">${payLabel(sale.paymentMethod)}</span></div>
+      ${(() => {
+        if (sale.paymentMethod === 'credit' && sale.customerId) {
+          const c = DB.Customers.byId(sale.customerId);
+          if (c && (c.debt||0) > 0) {
+            const S = DB.Settings.get(); const cur = S.currency || 'دج';
+            return `<div style="margin-top:10px;background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.35);border-radius:8px;padding:10px;font-size:13px;color:#f87171;text-align:center">
+              <i class="fas fa-triangle-exclamation"></i> إجمالي دين ${c.name}: <strong>${fmt(c.debt)} ${cur}</strong>
+            </div>`;
+          }
+        }
+        return '';
+      })()}
     </div>`;
   _currentInvoiceId = sale.id;
   openModal('modal-receipt');
@@ -1297,7 +1348,9 @@ function viewInvoice(id) {
 }
 
 function buildInvoiceHTML(s, S, cur) {
-  const logoIcon = `<div class="inv-logo-icon"><i class="fas fa-store"></i></div>`;
+  const logoIcon = S.logo
+    ? `<div class="inv-logo-img-wrap"><img src="${S.logo}" class="inv-logo-img" alt="logo"/></div>`
+    : `<div class="inv-logo-icon"><i class="fas fa-store"></i></div>`;
   const itemsRows = s.items.map((it, i) => `
     <tr>
       <td class="inv-td-num">${i + 1}</td>
@@ -1361,7 +1414,8 @@ function buildInvoiceHTML(s, S, cur) {
 
     <div class="inv-paper-footer">
       <div class="inv-barcode-line">${s.invoiceNo}</div>
-      <p class="inv-footer-thanks">شكراً لتعاملكم معنا • دكاني POS</p>
+      <p class="inv-footer-thanks">${S.thankYouMessage || 'شكراً لتعاملكم معنا 🙏'}</p>
+      <p class="inv-footer-credit">دكاني Dukani المصمم لتنظيم اعمال المحلات</p>
     </div>
   </div>`;
 }
@@ -1401,6 +1455,8 @@ function printInvoice() {
     .inv-paper-inner { background:#fff; border-radius:12px; padding:28px 24px; max-width:100%; margin:0 auto; font-family:'Cairo',sans-serif; color:#111827; }
     .inv-paper-header { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:20px; }
     .inv-logo-icon { width:52px; height:52px; background:#059669 !important; border-radius:12px; display:flex; align-items:center; justify-content:center; color:#fff; font-size:24px; flex-shrink:0; }
+    .inv-logo-img-wrap { width:52px; height:52px; background:#fff !important; border:1px solid #e5e7eb; border-radius:12px; display:flex; align-items:center; justify-content:center; overflow:hidden; flex-shrink:0; }
+    .inv-logo-img { width:100%; height:100%; object-fit:contain; }
     .inv-paper-store { flex:1; padding:0 14px; }
     .inv-store-name { font-size:20px; font-weight:900; margin:0 0 4px; color:#111827; }
     .inv-store-sub { font-size:12px; color:#6b7280; margin:2px 0; display:flex; align-items:center; gap:4px; }
@@ -1561,6 +1617,9 @@ function loadSettings() {
   document.getElementById('set-phone').value        = S.phone || '';
   document.getElementById('set-currency').value     = S.currency || 'دج';
   document.getElementById('set-low-stock').value    = S.lowStockThreshold || 5;
+  const thanksEl = document.getElementById('set-thanks');
+  if (thanksEl) thanksEl.value = S.thankYouMessage || '';
+  renderLogoPreview();
 
   renderCategories();
 
@@ -1575,15 +1634,58 @@ function loadSettings() {
 }
 
 function saveSettings() {
+  const current = DB.Settings.get();
   DB.Settings.save({
+    ...current,
     storeName:         document.getElementById('set-store-name').value.trim(),
     address:           document.getElementById('set-address').value.trim(),
     phone:             document.getElementById('set-phone').value.trim(),
     currency:          document.getElementById('set-currency').value,
-    lowStockThreshold: parseInt(document.getElementById('set-low-stock').value) || 5
+    lowStockThreshold: parseInt(document.getElementById('set-low-stock').value) || 5,
+    thankYouMessage:   (document.getElementById('set-thanks')?.value || '').trim()
   });
   toast('تم حفظ الإعدادات / Settings saved ✓', 'success');
   checkAlerts();
+}
+
+// ─── تخصيص الفاتورة: الشعار ─────────────────────────────────────────────────
+function uploadLogo(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    toast('الرجاء اختيار صورة صالحة / Please select a valid image', 'error');
+    return;
+  }
+  if (file.size > 1024 * 1024) {
+    toast('حجم الصورة كبير جداً (الحد الأقصى 1MB) / Image too large (max 1MB)', 'error');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = e => {
+    const current = DB.Settings.get();
+    DB.Settings.save({ ...current, logo: e.target.result });
+    renderLogoPreview();
+    toast('تم رفع الشعار / Logo uploaded ✓', 'success');
+  };
+  reader.readAsDataURL(file);
+  event.target.value = '';
+}
+
+function removeLogo() {
+  const current = DB.Settings.get();
+  if (!current.logo) return;
+  DB.Settings.save({ ...current, logo: '' });
+  renderLogoPreview();
+  toast('تم حذف الشعار / Logo removed', 'info');
+}
+
+function renderLogoPreview() {
+  const box = document.getElementById('logo-preview-box');
+  if (!box) return;
+  const S = DB.Settings.get();
+  box.innerHTML = S.logo
+    ? `<img src="${S.logo}" class="logo-preview-img" alt="logo"/>`
+    : `<i class="fas fa-store"></i><span>لا يوجد شعار</span>`;
 }
 
 function renderCategories() {
@@ -1669,6 +1771,200 @@ function toast(msg, type = 'info') {
 }
 
 
+// ════════════════════════════════════════════════════════════════════════════
+// تقرير الموردين / Suppliers Report
+// ════════════════════════════════════════════════════════════════════════════
+
+function showSuppliersReport() {
+  const S      = DB.Settings.get();
+  const cur    = S.currency || 'دج';
+  const allPurchases = DB.Purchases.all();
+  const allSuppliers = DB.Suppliers.all();
+
+  // ── بناء إحصائيات لكل مورد ──
+  const suppMap = {};
+
+  // إضافة الموردين المسجّلين
+  allSuppliers.forEach(s => {
+    suppMap[s.id] = {
+      id: s.id, name: s.name, phone: s.phone || '—', city: s.city || '—',
+      totalAmount: 0, orderCount: 0, lastOrder: null, products: new Set()
+    };
+  });
+
+  // حساب الإحصائيات من المشتريات
+  allPurchases.forEach(p => {
+    const key = p.supplierId || '__none__';
+    if (!suppMap[key]) {
+      suppMap[key] = {
+        id: key, name: p.supplier || 'مورد غير محدد',
+        phone: '—', city: '—',
+        totalAmount: 0, orderCount: 0, lastOrder: null, products: new Set()
+      };
+    }
+    const total = (p.qty || 0) * (p.unitPrice || 0);
+    suppMap[key].totalAmount += total;
+    suppMap[key].orderCount  += 1;
+    if (!suppMap[key].lastOrder || p.date > suppMap[key].lastOrder)
+      suppMap[key].lastOrder = p.date;
+    const prod = DB.Products.byId(p.productId);
+    if (prod) suppMap[key].products.add(prod.nameAr);
+  });
+
+  const rows = Object.values(suppMap)
+    .filter(s => s.orderCount > 0 || allSuppliers.find(x => x.id === s.id))
+    .sort((a, b) => b.totalAmount - a.totalAmount);
+
+  const grandTotal  = rows.reduce((a, s) => a + s.totalAmount, 0);
+  const grandOrders = rows.reduce((a, s) => a + s.orderCount, 0);
+  const activeSupp  = rows.filter(s => s.orderCount > 0).length;
+  const topSupp     = rows.length ? rows[0] : null;
+
+  // ── HTML التقرير ──
+  const body = document.getElementById('supp-report-body');
+  if (!body) return;
+
+  body.innerHTML = `
+    <!-- KPI سريع -->
+    <div class="kpi-grid" style="margin-bottom:20px">
+      <div class="kpi-card kpi-sales">
+        <div class="kpi-icon"><i class="fas fa-truck"></i></div>
+        <div class="kpi-info">
+          <div class="kpi-value">${allSuppliers.length}</div>
+          <div class="kpi-label">إجمالي الموردين</div>
+        </div>
+      </div>
+      <div class="kpi-card kpi-profit">
+        <div class="kpi-icon"><i class="fas fa-coins"></i></div>
+        <div class="kpi-info">
+          <div class="kpi-value">${fmt(grandTotal)} ${cur}</div>
+          <div class="kpi-label">إجمالي المشتريات</div>
+        </div>
+      </div>
+      <div class="kpi-card kpi-invoices">
+        <div class="kpi-icon"><i class="fas fa-receipt"></i></div>
+        <div class="kpi-info">
+          <div class="kpi-value">${grandOrders}</div>
+          <div class="kpi-label">إجمالي الطلبات</div>
+        </div>
+      </div>
+      <div class="kpi-card kpi-products">
+        <div class="kpi-icon"><i class="fas fa-star"></i></div>
+        <div class="kpi-info">
+          <div class="kpi-value">${topSupp ? topSupp.name.slice(0, 14) : '—'}</div>
+          <div class="kpi-label">المورد الأول</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- شريط البحث -->
+    <div class="filter-bar" style="margin-bottom:16px">
+      <input type="text" id="srep-search" placeholder="بحث في التقرير..." oninput="filterSuppReport(this.value)" style="flex:1"/>
+    </div>
+
+    <!-- الجدول -->
+    <div class="table-wrap" id="srep-table-wrap">
+      <table class="data-table" id="srep-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>المورد / Supplier</th>
+            <th>الهاتف</th>
+            <th>المدينة</th>
+            <th>عدد الطلبات</th>
+            <th>إجمالي المبلغ</th>
+            <th>النسبة %</th>
+            <th>آخر طلب</th>
+            <th>المنتجات المشتراة</th>
+          </tr>
+        </thead>
+        <tbody id="srep-body">
+          ${rows.length ? rows.map((s, i) => {
+            const pct = grandTotal > 0 ? ((s.totalAmount / grandTotal) * 100).toFixed(1) : '0.0';
+            const barW = grandTotal > 0 ? Math.round((s.totalAmount / grandTotal) * 100) : 0;
+            const prodsStr = [...s.products].slice(0, 3).join('، ') + (s.products.size > 3 ? ` +${s.products.size - 3}` : '');
+            const rankColor = i === 0 ? '#f59e0b' : i === 1 ? '#94a3b8' : i === 2 ? '#cd7c3a' : 'var(--text3)';
+            return `<tr data-supp-name="${s.name.toLowerCase()}">
+              <td><span style="font-size:16px;font-weight:900;color:${rankColor}">${i+1}</span></td>
+              <td>
+                <div style="font-weight:700;color:var(--text1)">${s.name}</div>
+                ${s.id !== '__none__' ? `<button class="btn-icon" style="margin-top:4px;padding:2px 8px;font-size:11px" onclick="closeModal('modal-supp-report');viewSupplierDetail('${s.id}')"><i class="fas fa-eye"></i> تفاصيل</button>` : ''}
+              </td>
+              <td>${s.phone !== '—' ? `<a href="tel:${s.phone}" style="color:var(--accent)">${s.phone}</a>` : '—'}</td>
+              <td>${s.city}</td>
+              <td><span class="badge-count">${s.orderCount}</span></td>
+              <td><strong style="color:var(--accent)">${fmt(s.totalAmount)} ${cur}</strong></td>
+              <td>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <div style="flex:1;background:#1e293b;border-radius:4px;height:8px;overflow:hidden">
+                    <div style="width:${barW}%;height:100%;background:linear-gradient(90deg,#10b981,#059669);border-radius:4px"></div>
+                  </div>
+                  <span style="font-size:12px;color:var(--text2);min-width:36px">${pct}%</span>
+                </div>
+              </td>
+              <td style="font-size:12px;color:var(--text3)">${s.lastOrder ? fmtDate(s.lastOrder) : '—'}</td>
+              <td style="font-size:12px;color:var(--text3);max-width:160px">${prodsStr || '—'}</td>
+            </tr>`;
+          }).join('')
+          : `<tr><td colspan="9" class="empty-td"><i class="fas fa-info-circle"></i> لا توجد بيانات — أضف مشتريات أولاً</td></tr>`}
+        </tbody>
+        ${rows.length ? `
+        <tfoot>
+          <tr style="font-weight:700;background:#0d1117;border-top:2px solid var(--border)">
+            <td colspan="4" style="text-align:right;padding:12px 16px;color:var(--text2)">
+              <i class="fas fa-sigma"></i> الإجمالي / Total
+            </td>
+            <td><span class="badge-count">${grandOrders}</span></td>
+            <td style="color:var(--accent);font-size:15px">${fmt(grandTotal)} ${cur}</td>
+            <td>100%</td>
+            <td colspan="2"></td>
+          </tr>
+        </tfoot>` : ''}
+      </table>
+    </div>`;
+
+  openModal('modal-supp-report');
+}
+
+function filterSuppReport(q) {
+  const tbody = document.getElementById('srep-body');
+  if (!tbody) return;
+  const term = q.toLowerCase();
+  tbody.querySelectorAll('tr[data-supp-name]').forEach(row => {
+    const name = row.dataset.suppName || '';
+    row.style.display = (!term || name.includes(term)) ? '' : 'none';
+  });
+}
+
+function printSuppliersReport() {
+  const content = document.getElementById('supp-report-body')?.innerHTML || '';
+  const S = DB.Settings.get();
+  const win = window.open('', '_blank');
+  win.document.write(`<!DOCTYPE html><html dir="rtl" lang="ar"><head>
+    <meta charset="UTF-8"/><title>تقرير الموردين — ${S.storeName || 'دكاني'}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap" rel="stylesheet"/>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+    <style>
+      *{box-sizing:border-box}
+      body{font-family:'Cairo',sans-serif;background:#fff;color:#111;padding:24px;direction:rtl}
+      h2{margin:0 0 16px;color:#059669}
+      table{width:100%;border-collapse:collapse;font-size:13px}
+      th{background:#059669;color:#fff;padding:10px 12px;text-align:right}
+      td{padding:8px 12px;border-bottom:1px solid #e5e7eb}
+      tr:nth-child(even)td{background:#f9fafb}
+      tfoot td{font-weight:700;background:#ecfdf5;border-top:2px solid #059669}
+      .no-print{display:none}
+      @media print{body{padding:0}}
+    </style>
+  </head><body>
+    <h2><i class="fas fa-chart-bar"></i> تقرير الموردين — ${S.storeName || 'دكاني'}</h2>
+    <p style="color:#6b7280;font-size:13px;margin:0 0 16px">تاريخ التقرير: ${new Date().toLocaleDateString('ar-DZ',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</p>
+    ${content}
+    <script>window.onload=()=>{window.print();}<\/script>
+  </body></html>`);
+  win.document.close();
+}
+
 // ─── تسجيل نظام العمل دون اتصال الديناميكي (Dakani PWA Active) ───────────────
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
@@ -1677,3 +1973,647 @@ if ('serviceWorker' in navigator) {
       .catch(err => console.error('خطأ في تسجيل نظام الـ PWA:', err));
   });
 }
+// ════════════════════════════════════════════════════════════════════════════
+// تسوية المخزون / Inventory Adjustment
+// ════════════════════════════════════════════════════════════════════════════
+
+function renderInventory() {
+  const cur = DB.Settings.get().currency || 'دج';
+  const products = DB.Products.all();
+  const adjs     = DB.StockAdjustments.all();
+  const q        = (document.getElementById('inv-search')?.value || '').toLowerCase();
+
+  // ── بطاقات الملخص ──
+  const totalProds   = products.length;
+  const outOfStock   = products.filter(p => (p.stock || 0) === 0).length;
+  const lowStock     = products.filter(p => (p.stock || 0) > 0 && (p.stock || 0) <= (DB.Settings.get().lowStockThreshold || 5)).length;
+  const adjToday     = adjs.filter(a => a.date && a.date.startsWith(DB.today())).length;
+
+  document.getElementById('inv-summary').innerHTML = `
+    <div class="inv-stat-card">
+      <i class="fas fa-boxes-stacked" style="color:#6366f1"></i>
+      <div>
+        <div class="inv-stat-val">${totalProds}</div>
+        <div class="inv-stat-lbl">إجمالي المنتجات / Total Products</div>
+      </div>
+    </div>
+    <div class="inv-stat-card">
+      <i class="fas fa-circle-xmark" style="color:#ef4444"></i>
+      <div>
+        <div class="inv-stat-val" style="color:#ef4444">${outOfStock}</div>
+        <div class="inv-stat-lbl">نفد المخزون / Out of Stock</div>
+      </div>
+    </div>
+    <div class="inv-stat-card">
+      <i class="fas fa-triangle-exclamation" style="color:#f59e0b"></i>
+      <div>
+        <div class="inv-stat-val" style="color:#f59e0b">${lowStock}</div>
+        <div class="inv-stat-lbl">مخزون منخفض / Low Stock</div>
+      </div>
+    </div>
+    <div class="inv-stat-card">
+      <i class="fas fa-clock-rotate-left" style="color:#10b981"></i>
+      <div>
+        <div class="inv-stat-val">${adjToday}</div>
+        <div class="inv-stat-lbl">تسويات اليوم / Today's Adjustments</div>
+      </div>
+    </div>`;
+
+  // ── سجل التسويات ──
+  const filtered = q
+    ? adjs.filter(a => a.productName?.toLowerCase().includes(q) || (a.reason||'').includes(q) || (a.note||'').toLowerCase().includes(q))
+    : adjs;
+
+  const wrap = document.getElementById('inv-log-wrap');
+  if (!filtered.length) {
+    wrap.innerHTML = `<div class="empty-state"><i class="fas fa-clipboard-list"></i> لا توجد تسويات بعد / No adjustments yet</div>`;
+    return;
+  }
+
+  wrap.innerHTML = `
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>التاريخ / Date</th>
+            <th>المنتج / Product</th>
+            <th>الكمية القديمة</th>
+            <th>الكمية الجديدة</th>
+            <th>الفرق / Δ</th>
+            <th>السبب / Reason</th>
+            <th>ملاحظة / Note</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${filtered.map(a => {
+            const d    = new Date(a.date);
+            const dateStr = d.toLocaleDateString('ar-DZ') + ' ' + d.toLocaleTimeString('ar-DZ', {hour:'2-digit',minute:'2-digit'});
+            const delta   = a.delta >= 0
+              ? `<span style="color:#10b981;font-weight:700">+${a.delta}</span>`
+              : `<span style="color:#ef4444;font-weight:700">${a.delta}</span>`;
+            return `<tr>
+              <td style="font-size:12px;white-space:nowrap">${dateStr}</td>
+              <td><strong>${a.productName || ''}</strong>${a.unit ? ' <small>('+a.unit+')</small>' : ''}</td>
+              <td style="text-align:center">${a.oldQty}</td>
+              <td style="text-align:center;font-weight:700">${a.newQty}</td>
+              <td style="text-align:center">${delta}</td>
+              <td><span class="adj-reason-badge">${a.reason || ''}</span></td>
+              <td style="color:#6b7280;font-size:13px">${a.note || '—'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+// ── Modal ──
+let _adjSelectedProd = null;
+
+function openAdjModal() {
+  _adjSelectedProd = null;
+  document.getElementById('adj-prod-search').value = '';
+  document.getElementById('adj-prod-id').value = '';
+  document.getElementById('adj-prod-results').innerHTML = '';
+  document.getElementById('adj-prod-info').style.display = 'none';
+  document.getElementById('adj-new-qty').value = '';
+  document.getElementById('adj-reason').value = 'جرد يدوي';
+  document.getElementById('adj-note').value = '';
+  document.getElementById('adj-preview').style.display = 'none';
+  document.getElementById('modal-inventory').classList.add('active');
+  setTimeout(() => document.getElementById('adj-prod-search')?.focus(), 100);
+}
+
+function adjSearchProducts() {
+  const q   = document.getElementById('adj-prod-search').value.trim();
+  const res = document.getElementById('adj-prod-results');
+  if (!q) { res.innerHTML = ''; return; }
+  const hits = DB.Products.search(q).slice(0, 8);
+  if (!hits.length) { res.innerHTML = '<div class="adj-no-result">لا نتائج / No results</div>'; return; }
+  res.innerHTML = hits.map(p => `
+    <div class="adj-result-item" onclick="adjSelectProduct('${p.id}')">
+      <strong>${p.nameAr}</strong>
+      ${p.nameEn ? `<span style="color:#6b7280"> · ${p.nameEn}</span>` : ''}
+      <span class="adj-stock-badge ${(p.stock||0)===0?'out':(p.stock||0)<=5?'low':'ok'}">
+        ${p.stock || 0} ${p.unit || ''}
+      </span>
+    </div>`).join('');
+}
+
+function adjSelectProduct(id) {
+  const p = DB.Products.byId(id);
+  if (!p) return;
+  _adjSelectedProd = p;
+  document.getElementById('adj-prod-id').value = id;
+  document.getElementById('adj-prod-search').value = p.nameAr + (p.nameEn ? ' / ' + p.nameEn : '');
+  document.getElementById('adj-prod-results').innerHTML = '';
+  document.getElementById('adj-new-qty').value = p.stock || 0;
+
+  const cur = DB.Settings.get().currency || 'دج';
+  const info = document.getElementById('adj-prod-info');
+  info.style.display = 'block';
+  info.innerHTML = `
+    <div class="adj-info-row"><span>الرصيد الحالي:</span> <strong>${p.stock || 0} ${p.unit || ''}</strong></div>
+    <div class="adj-info-row"><span>سعر البيع:</span> <strong>${(p.price || 0).toFixed(2)} ${cur}</strong></div>
+    <div class="adj-info-row"><span>سعر التكلفة:</span> <strong>${(p.cost || 0).toFixed(2)} ${cur}</strong></div>`;
+
+  adjUpdatePreview();
+}
+
+function adjUpdatePreview() {
+  if (!_adjSelectedProd) return;
+  const newQty = parseFloat(document.getElementById('adj-new-qty').value);
+  const preview = document.getElementById('adj-preview');
+  if (isNaN(newQty)) { preview.style.display = 'none'; return; }
+  const delta = newQty - (_adjSelectedProd.stock || 0);
+  const sign  = delta >= 0 ? '+' : '';
+  const color = delta > 0 ? '#10b981' : delta < 0 ? '#ef4444' : '#6b7280';
+  preview.style.display = 'block';
+  preview.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span>${_adjSelectedProd.stock || 0} ${_adjSelectedProd.unit || ''}</span>
+      <i class="fas fa-arrow-left" style="color:#6b7280"></i>
+      <span style="font-size:18px;font-weight:700">${newQty} ${_adjSelectedProd.unit || ''}</span>
+      <span style="color:${color};font-weight:700;font-size:15px">(${sign}${delta})</span>
+    </div>`;
+}
+
+// اربط حدث تغيير الكمية بالمعاينة
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('adj-new-qty')?.addEventListener('input', adjUpdatePreview);
+});
+
+function saveAdjustment() {
+  const prodId = document.getElementById('adj-prod-id').value;
+  const newQty = parseFloat(document.getElementById('adj-new-qty').value);
+  const reason = document.getElementById('adj-reason').value;
+  const note   = document.getElementById('adj-note').value.trim();
+
+  if (!prodId)       { toast('اختر منتجاً أولاً / Select a product', 'warning'); return; }
+  if (isNaN(newQty) || newQty < 0) { toast('أدخل كمية صحيحة / Enter valid quantity', 'warning'); return; }
+
+  DB.StockAdjustments.add(prodId, newQty, reason, note);
+  closeModal('modal-inventory');
+  toast('تم تسوية المخزون بنجاح ✓', 'success');
+  renderInventory();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  RETURNS & REFUNDS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ─── حالة المودال ─────────────────────────────────────────────────────────────
+let _retSelectedSale     = null;  // الفاتورة المختارة
+let _retCheckedItems     = [];    // عناصر محددة من الفاتورة
+let _retManualItems      = [];    // عناصر يدوية (بدون فاتورة)
+let _retManualProdId     = null;
+let _retMode             = 'invoice'; // 'invoice' | 'manual'
+
+// ─── فتح مودال الإنشاء ────────────────────────────────────────────────────────
+function openReturnModal() {
+  _retSelectedSale  = null;
+  _retCheckedItems  = [];
+  _retManualItems   = [];
+  _retManualProdId  = null;
+  _retMode          = 'invoice';
+
+  const inp = document.getElementById('ret-inv-input');
+  if (inp) inp.value = '';
+  const res = document.getElementById('ret-inv-results');
+  if (res) { res.innerHTML = ''; res.classList.remove('open'); }
+  const info = document.getElementById('ret-inv-info');
+  if (info) info.style.display = 'none';
+  const iw = document.getElementById('ret-items-wrap');
+  if (iw) iw.style.display = 'none';
+  const mw = document.getElementById('ret-manual-wrap');
+  if (mw) mw.style.display = 'none';
+  const mb = document.getElementById('ret-manual-btn');
+  if (mb) { mb.innerHTML = '<i class="fas fa-pen"></i> بدون فاتورة'; mb.onclick = retUseManual; }
+  retUpdateTotal();
+  openModal('modal-return');
+}
+
+// ─── البحث عن فاتورة ─────────────────────────────────────────────────────────
+function retSearchInvoice() {
+  const q   = (document.getElementById('ret-inv-input')?.value || '').trim().toUpperCase();
+  const res = document.getElementById('ret-inv-results');
+  if (!res) return;
+  if (!q) { res.innerHTML = ''; res.classList.remove('open'); return; }
+
+  const S   = DB.Settings.get(); const cur = S.currency || 'دج';
+  const all = DB.Sales.all().slice().reverse();
+  const matches = all.filter(s =>
+    s.invoiceNo.includes(q) ||
+    (s.customerName || '').includes(q)
+  ).slice(0, 8);
+
+  if (!matches.length) {
+    res.innerHTML = '<div class="ret-inv-result-row" style="color:var(--text3);cursor:default">لا توجد نتائج / No results</div>';
+    res.classList.add('open');
+    return;
+  }
+
+  res.innerHTML = matches.map(s => `
+    <div class="ret-inv-result-row" onclick="retSelectInvoice('${s.id}')">
+      <span class="inv-no">${s.invoiceNo}</span>
+      <span class="inv-customer">${s.customerName}</span>
+      <span class="inv-total">${fmt(s.total)} ${cur}</span>
+    </div>`).join('');
+  res.classList.add('open');
+}
+
+// ─── اختيار فاتورة ───────────────────────────────────────────────────────────
+function retSelectInvoice(saleId) {
+  const s = DB.Sales.byId(saleId);
+  if (!s) return;
+  _retSelectedSale = s;
+  _retMode = 'invoice';
+
+  // إخفاء نتائج البحث
+  const res = document.getElementById('ret-inv-results');
+  if (res) { res.innerHTML = ''; res.classList.remove('open'); }
+  const inp = document.getElementById('ret-inv-input');
+  if (inp) inp.value = s.invoiceNo;
+
+  // إخفاء الإدخال اليدوي
+  const mw = document.getElementById('ret-manual-wrap');
+  if (mw) mw.style.display = 'none';
+
+  // عرض chip معلومات الفاتورة
+  const S   = DB.Settings.get(); const cur = S.currency || 'دج';
+  const chip = document.getElementById('ret-inv-chip');
+  if (chip) chip.innerHTML = `
+    <span><span class="chip-label">رقم الفاتورة</span><br/><strong>${s.invoiceNo}</strong></span>
+    <span><span class="chip-label">الزبون</span><br/>${s.customerName}</span>
+    <span><span class="chip-label">الإجمالي</span><br/>${fmt(s.total)} ${cur}</span>
+    <span><span class="chip-label">الدفع</span><br/><span class="badge pay-${s.paymentMethod}">${payLabel(s.paymentMethod)}</span></span>
+    <span><span class="chip-label">التاريخ</span><br/>${fmtDate(s.date)}</span>`;
+  document.getElementById('ret-inv-info').style.display = 'block';
+
+  // بناء جدول الاختيار
+  const tbody = document.getElementById('ret-items-body');
+  if (tbody) {
+    tbody.innerHTML = s.items.map((it, idx) => `
+      <tr>
+        <td><input type="checkbox" class="ret-item-chk" data-idx="${idx}" onchange="retUpdateChecked()"/></td>
+        <td>${it.nameAr}</td>
+        <td>${it.qty}</td>
+        <td><input type="number" class="ret-qty-inp" data-idx="${idx}" value="${it.qty}"
+            min="1" max="${it.qty}" step="${it.isWeight ? '0.001' : '1'}"
+            style="width:70px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:4px 6px;color:var(--text1)"
+            onchange="retUpdateChecked()"/></td>
+        <td>${fmt(it.price)} ${cur}</td>
+        <td id="ret-item-total-${idx}">${fmt(it.total)} ${cur}</td>
+      </tr>`).join('');
+  }
+  document.getElementById('ret-items-wrap').style.display = 'block';
+  retUpdateChecked();
+}
+
+// ─── تحديث الكميات المختارة ───────────────────────────────────────────────────
+function retUpdateChecked() {
+  if (!_retSelectedSale) return;
+  const S   = DB.Settings.get(); const cur = S.currency || 'دج';
+  _retCheckedItems = [];
+
+  document.querySelectorAll('.ret-item-chk').forEach(chk => {
+    const idx = parseInt(chk.dataset.idx);
+    const it  = _retSelectedSale.items[idx];
+    const qtyInp = document.querySelector(`.ret-qty-inp[data-idx="${idx}"]`);
+    const qty = parseFloat(qtyInp?.value || it.qty);
+    const unitPrice = it.price;
+    const total = +(qty * unitPrice).toFixed(2);
+
+    // تحديث إجمالي الصف
+    const totCell = document.getElementById(`ret-item-total-${idx}`);
+    if (totCell) totCell.textContent = fmt(total) + ' ' + cur;
+
+    if (chk.checked && qty > 0) {
+      _retCheckedItems.push({
+        productId: it.productId,
+        nameAr:    it.nameAr,
+        qty,
+        price:     unitPrice,
+        total,
+        restoreStock: true
+      });
+    }
+  });
+
+  retUpdateTotal();
+}
+
+// ─── تحديد/إلغاء الكل ────────────────────────────────────────────────────────
+function retToggleAll(masterChk) {
+  document.querySelectorAll('.ret-item-chk').forEach(chk => {
+    chk.checked = masterChk.checked;
+  });
+  retUpdateChecked();
+}
+
+// ─── تحديث إجمالي الاسترداد ──────────────────────────────────────────────────
+function retUpdateTotal() {
+  const S   = DB.Settings.get(); const cur = S.currency || 'دج';
+  let total = 0;
+  if (_retMode === 'invoice') {
+    total = _retCheckedItems.reduce((a, it) => a + it.total, 0);
+  } else {
+    total = _retManualItems.reduce((a, it) => a + it.total, 0);
+  }
+  const el = document.getElementById('ret-total-val');
+  if (el) el.textContent = fmt(total) + ' ' + cur;
+}
+
+// ─── وضع الإدخال اليدوي ──────────────────────────────────────────────────────
+function retUseManual() {
+  _retMode = 'manual';
+  _retSelectedSale = null;
+  _retManualItems  = [];
+  _retManualProdId = null;
+
+  document.getElementById('ret-inv-info').style.display      = 'none';
+  document.getElementById('ret-items-wrap').style.display    = 'none';
+  document.getElementById('ret-manual-wrap').style.display   = 'block';
+  document.getElementById('ret-manual-items').innerHTML      = '';
+  document.getElementById('ret-manual-btn').innerHTML        = '<i class="fas fa-file-invoice"></i> من فاتورة';
+  document.getElementById('ret-manual-btn').onclick          = retUseInvoice;
+  retUpdateTotal();
+}
+
+function retUseInvoice() {
+  _retMode = 'invoice';
+  _retManualItems = [];
+  document.getElementById('ret-manual-wrap').style.display = 'none';
+  document.getElementById('ret-manual-btn').innerHTML = '<i class="fas fa-pen"></i> بدون فاتورة';
+  document.getElementById('ret-manual-btn').onclick = retUseManual;
+  retUpdateTotal();
+}
+
+// ─── البحث في وضع اليدوي ─────────────────────────────────────────────────────
+function retManualSearch() {
+  const q   = (document.getElementById('ret-manual-prod')?.value || '').toLowerCase();
+  const res = document.getElementById('ret-manual-results');
+  if (!res) return;
+  if (q.length < 1) { res.innerHTML = ''; res.style.display = 'none'; return; }
+
+  const prods = DB.Products.search(q).slice(0, 6);
+  if (!prods.length) { res.innerHTML = ''; res.style.display = 'none'; return; }
+
+  res.style.display = 'block';
+  res.innerHTML = prods.map(p => `
+    <div class="adj-result-row" onclick="retManualSelectProd('${p.id}')">
+      <span>${p.nameAr}</span>
+      <span style="color:var(--text3);font-size:12px">${fmt(p.price)} دج • مخزون: ${p.stock}</span>
+    </div>`).join('');
+}
+
+function retManualSelectProd(id) {
+  const p = DB.Products.byId(id);
+  if (!p) return;
+  _retManualProdId = id;
+  document.getElementById('ret-manual-prod').value = p.nameAr;
+  document.getElementById('ret-manual-price').value = p.price || 0;
+  document.getElementById('ret-manual-results').style.display = 'none';
+  retCalcManual();
+}
+
+function retCalcManual() {
+  // لا تُضيف تلقائياً — فقط حساب مرئي
+}
+
+function retAddManualItem() {
+  if (!_retManualProdId) { toast('اختر منتجاً أولاً / Select a product first', 'error'); return; }
+  const qty   = parseFloat(document.getElementById('ret-manual-qty')?.value || 1);
+  const price = parseFloat(document.getElementById('ret-manual-price')?.value || 0);
+  if (qty <= 0 || price < 0) { toast('الكمية والسعر يجب أن يكونا صحيحين / Invalid qty or price', 'error'); return; }
+  const p = DB.Products.byId(_retManualProdId);
+  _retManualItems.push({
+    productId: _retManualProdId,
+    nameAr: p.nameAr,
+    qty,
+    price,
+    total: +(qty * price).toFixed(2),
+    restoreStock: true
+  });
+  retRenderManualItems();
+  document.getElementById('ret-manual-prod').value  = '';
+  document.getElementById('ret-manual-qty').value   = '1';
+  document.getElementById('ret-manual-price').value = '0';
+  _retManualProdId = null;
+  retUpdateTotal();
+}
+
+function retRenderManualItems() {
+  const S = DB.Settings.get(); const cur = S.currency || 'دج';
+  const el = document.getElementById('ret-manual-items');
+  if (!el) return;
+  el.innerHTML = _retManualItems.length
+    ? _retManualItems.map((it, i) => `
+        <div class="ret-manual-item">
+          <span>${it.nameAr} × ${it.qty}</span>
+          <span>${fmt(it.total)} ${cur}</span>
+          <button onclick="retRemoveManualItem(${i})"><i class="fas fa-xmark"></i></button>
+        </div>`).join('')
+    : '';
+}
+
+function retRemoveManualItem(i) {
+  _retManualItems.splice(i, 1);
+  retRenderManualItems();
+  retUpdateTotal();
+}
+
+// ─── حفظ المرتجع ─────────────────────────────────────────────────────────────
+function saveReturn() {
+  const S   = DB.Settings.get(); const cur = S.currency || 'دج';
+  const reason       = document.getElementById('ret-reason')?.value || 'أخرى';
+  const refundMethod = document.getElementById('ret-refund-method')?.value || 'cash';
+
+  let items = [];
+  let totalRefund = 0;
+
+  if (_retMode === 'invoice') {
+    if (!_retSelectedSale) { toast('اختر فاتورة أولاً / Select an invoice first', 'error'); return; }
+    if (!_retCheckedItems.length) { toast('اختر منتجاً واحداً على الأقل / Select at least one item', 'error'); return; }
+    items = _retCheckedItems;
+    totalRefund = items.reduce((a, it) => a + it.total, 0);
+  } else {
+    if (!_retManualItems.length) { toast('أضف منتجاً واحداً على الأقل / Add at least one item', 'error'); return; }
+    items = _retManualItems;
+    totalRefund = items.reduce((a, it) => a + it.total, 0);
+  }
+
+  const data = {
+    saleId:   _retSelectedSale?.id   || null,
+    invoiceNo: _retSelectedSale?.invoiceNo || '',
+    customerId:   _retSelectedSale?.customerId   || null,
+    customerName: _retSelectedSale?.customerName || 'زبون عام',
+    originalPaymentMethod: _retSelectedSale?.paymentMethod || null,
+    items,
+    totalRefund: +totalRefund.toFixed(2),
+    reason,
+    refundMethod
+  };
+
+  DB.Returns.create(data);
+  closeModal('modal-return');
+  renderReturns();
+  checkAlerts();
+  toast(`✅ تم تسجيل المرتجع — ${fmt(totalRefund)} ${cur}`, 'success');
+}
+
+// ─── عرض صفحة المرتجعات ──────────────────────────────────────────────────────
+function renderReturns() {
+  const S   = DB.Settings.get(); const cur = S.currency || 'دج';
+  const from = document.getElementById('ret-date-from')?.value;
+  const to   = document.getElementById('ret-date-to')?.value;
+  const q    = (document.getElementById('ret-search')?.value || '').toLowerCase();
+
+  let list = DB.Returns.all().slice().reverse();
+  if (from && to) list = list.filter(r => r.date >= from && r.date <= to + 'T23:59:59');
+  if (q) list = list.filter(r =>
+    r.returnNo.toLowerCase().includes(q) ||
+    r.customerName.toLowerCase().includes(q) ||
+    r.invoiceNo.toLowerCase().includes(q)
+  );
+
+  // KPI
+  const kpiEl = document.getElementById('ret-kpi-row');
+  const allRet = DB.Returns.all();
+  const totalRef = allRet.reduce((a, r) => a + r.totalRefund, 0);
+  const todayRet = allRet.filter(r => r.date && r.date.startsWith(DB.today()));
+  const todayRef = todayRet.reduce((a, r) => a + r.totalRefund, 0);
+  if (kpiEl) kpiEl.innerHTML = `
+    <div class="ret-kpi-card">
+      <div class="ret-kpi-icon red"><i class="fas fa-rotate-left"></i></div>
+      <div><div class="ret-kpi-val">${allRet.length}</div><div class="ret-kpi-lbl">إجمالي المرتجعات</div></div>
+    </div>
+    <div class="ret-kpi-card">
+      <div class="ret-kpi-icon gold"><i class="fas fa-coins"></i></div>
+      <div><div class="ret-kpi-val">${fmt(totalRef)}</div><div class="ret-kpi-lbl">إجمالي الاسترداد (${cur})</div></div>
+    </div>
+    <div class="ret-kpi-card">
+      <div class="ret-kpi-icon blue"><i class="fas fa-calendar-day"></i></div>
+      <div><div class="ret-kpi-val">${todayRet.length}</div><div class="ret-kpi-lbl">مرتجعات اليوم • ${fmt(todayRef)} ${cur}</div></div>
+    </div>`;
+
+  // جدول
+  const tbody = document.getElementById('returns-body');
+  if (!tbody) return;
+  tbody.innerHTML = list.length ? list.map(r => `
+    <tr>
+      <td><code>${r.returnNo}</code></td>
+      <td>${r.invoiceNo ? `<code>${r.invoiceNo}</code>` : '<span style="color:var(--text3)">—</span>'}</td>
+      <td>${r.customerName}</td>
+      <td style="font-size:12px;color:var(--text2)">${r.items.map(it => it.nameAr + ' ×' + it.qty).join(' ، ')}</td>
+      <td><strong style="color:var(--red)">- ${fmt(r.totalRefund)} ${cur}</strong></td>
+      <td style="font-size:12px">${r.reason}</td>
+      <td>${fmtDate(r.date)}</td>
+      <td><button class="btn-icon edit" onclick="viewReturn('${r.id}')"><i class="fas fa-eye"></i></button></td>
+      <td><button class="btn-icon danger" onclick="deleteReturn('${r.id}')"><i class="fas fa-trash"></i></button></td>
+    </tr>`).join('')
+  : `<tr><td colspan="9" class="empty-td"><i class="fas fa-rotate-left"></i> لا توجد مرتجعات / No returns yet</td></tr>`;
+
+  // شريط الملخص
+  const totalF  = list.reduce((a, r) => a + r.totalRefund, 0);
+  const bar = document.getElementById('ret-summary-bar');
+  if (bar && list.length) {
+    bar.innerHTML = `
+      <span><i class="fas fa-rotate-left"></i> ${list.length} مرتجع</span>
+      <span><i class="fas fa-coins"></i> إجمالي الاسترداد: <strong style="color:var(--red)">- ${fmt(totalF)} ${cur}</strong></span>`;
+  } else if (bar) bar.innerHTML = '';
+}
+
+// ─── عرض تفاصيل مرتجع ────────────────────────────────────────────────────────
+function viewReturn(id) {
+  const r = DB.Returns.byId(id);
+  if (!r) return;
+  const S = DB.Settings.get(); const cur = S.currency || 'دج';
+
+  const refundLabel = r.refundMethod === 'cash' ? 'نقدي / Cash' : 'رصيد للزبون / Credit Note';
+  const refundClass = `refund-${r.refundMethod}`;
+
+  const rows = r.items.map((it, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td>${it.nameAr}</td>
+      <td>${it.qty}</td>
+      <td>${fmt(it.price)} ${cur}</td>
+      <td><strong>${fmt(it.total)} ${cur}</strong></td>
+    </tr>`).join('');
+
+  document.getElementById('ret-detail-body').innerHTML = `
+    <div class="ret-detail-header">
+      <div>
+        <div class="ret-no">${r.returnNo}</div>
+        <div style="color:var(--text3);font-size:12px;margin-top:4px">${fmtDate(r.date)}</div>
+      </div>
+      <span class="refund-badge"><i class="fas fa-rotate-left"></i> مرتجع</span>
+    </div>
+    <div class="ret-info-grid">
+      <div class="ret-info-cell"><div class="lbl">الزبون</div><div class="val">${r.customerName}</div></div>
+      <div class="ret-info-cell"><div class="lbl">الفاتورة الأصلية</div><div class="val">${r.invoiceNo || '—'}</div></div>
+      <div class="ret-info-cell"><div class="lbl">سبب الإرجاع</div><div class="val">${r.reason}</div></div>
+      <div class="ret-info-cell"><div class="lbl">طريقة الاسترداد</div>
+        <div class="val"><span class="badge ${refundClass}">${refundLabel}</span></div></div>
+    </div>
+    <div class="table-wrap" style="margin-bottom:14px">
+      <table class="data-table">
+        <thead><tr><th>#</th><th>المنتج</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="ret-total-box">
+      <span>إجمالي الاسترداد / Total Refund</span>
+      <strong>- ${fmt(r.totalRefund)} ${cur}</strong>
+    </div>`;
+
+  openModal('modal-return-detail');
+}
+
+// ─── حذف مرتجع ───────────────────────────────────────────────────────────────
+function deleteReturn(id) {
+  if (!confirm('⚠️ حذف هذا المرتجع؟ سيتم عكس المخزون / Delete return? Stock will be reversed.')) return;
+  DB.Returns.delete(id);
+  renderReturns();
+  checkAlerts();
+  toast('تم حذف المرتجع / Return deleted', 'info');
+}
+
+// ─── طباعة المرتجع ───────────────────────────────────────────────────────────
+function printReturn() {
+  const content = document.getElementById('ret-detail-body')?.innerHTML;
+  if (!content) return;
+  const S = DB.Settings.get();
+  const w = window.open('', '_blank');
+  w.document.write(`<!DOCTYPE html><html dir="rtl"><head>
+    <meta charset="UTF-8"><title>مرتجع</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap">
+    <style>
+      body { font-family:'Cairo',sans-serif; padding:20mm; direction:rtl; color:#111; }
+      .ret-detail-header { display:flex; justify-content:space-between; margin-bottom:16px; }
+      .ret-no { font-size:22px; font-weight:900; }
+      .refund-badge { background:#fee2e2; color:#dc2626; padding:4px 12px; border-radius:20px; font-size:12px; font-weight:700; }
+      .ret-info-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:16px; }
+      .ret-info-cell { border:1px solid #e5e7eb; border-radius:6px; padding:8px 12px; }
+      .lbl { font-size:10px; color:#6b7280; text-transform:uppercase; }
+      .val { font-size:13px; font-weight:600; }
+      table { width:100%; border-collapse:collapse; margin-bottom:14px; }
+      th,td { border:1px solid #e5e7eb; padding:6px 10px; font-size:12px; text-align:right; }
+      th { background:#f9fafb; }
+      .ret-total-box { display:flex; justify-content:space-between; padding:10px 14px;
+        border:2px solid #fca5a5; border-radius:8px; }
+      .ret-total-box strong { color:#dc2626; font-size:18px; }
+      .badge { padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700; }
+      .refund-cash { background:#d1fae5; color:#065f46; }
+      .refund-credit_note { background:#fef3c7; color:#92400e; }
+    </style>
+  </head><body>
+    <h2 style="text-align:center;margin-bottom:16px">${S.storeName || 'دكاني'} — مرتجع / Return</h2>
+    ${content}
+  </body></html>`);
+  w.document.close();
+  setTimeout(() => { w.print(); w.close(); }, 400);
+}
+
+// ─── زر إضافة في وضع اليدوي (يُضاف في HTML لكن نربطه هنا) ──────────────────
+// ملاحظة: الزر موجود في المودال بـ onclick="retAddManualItem()"
