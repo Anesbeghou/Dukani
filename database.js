@@ -19,7 +19,9 @@ const DB = (() => {
     sale_items: [],
     purchases: [],
     suppliers: [],
-    debt_payments: []
+    debt_payments: [],
+    stock_adjustments: [],
+    returns: []
   };
 
   // ─── IndexedDB Core ─────────────────────────────────────────────────────────
@@ -162,7 +164,8 @@ const DB = (() => {
       write('categories', cats.map(n => ({ id: uid(), name: n })));
       write('settings', {
         storeName: 'دكاني', address: '', phone: '',
-        currency: 'دج', lowStockThreshold: 5
+        currency: 'دج', lowStockThreshold: 5,
+        logo: '', thankYouMessage: 'شكراً لتعاملكم معنا 🙏'
       });
       write('seeded', [1]);
     }
@@ -451,7 +454,123 @@ const DB = (() => {
     }
   };
 
-  // ─── EXPORT / IMPORT ────────────────────────────────────────────────────────
+  // ─── STOCK ADJUSTMENTS (جرد يدوي) ──────────────────────────────────────────
+  const StockAdjustments = {
+    all: () => read('stock_adjustments'),
+    add: (productId, newQty, reason, note) => {
+      const list    = read('products');
+      const i       = list.findIndex(p => p.id === productId);
+      if (i < 0) return null;
+      const oldQty  = list[i].stock || 0;
+      const delta   = newQty - oldQty;
+      list[i].stock = newQty;
+      list[i].updatedAt = now();
+      write('products', list);
+
+      const adj = {
+        id: uid(),
+        productId,
+        productName: list[i].nameAr,
+        unit: list[i].unit || '',
+        oldQty,
+        newQty,
+        delta,
+        reason: reason || 'جرد يدوي',
+        note:   note   || '',
+        date:   now(),
+        createdAt: now()
+      };
+      const adjs = read('stock_adjustments');
+      adjs.unshift(adj);
+      write('stock_adjustments', adjs);
+      return adj;
+    },
+    clear: () => write('stock_adjustments', [])
+  };
+
+  // ─── RETURNS (مرتجعات) ──────────────────────────────────────────────────────
+  const Returns = {
+    all:     () => read('returns'),
+    byId:    id => read('returns').find(r => r.id === id),
+    bySale:  saleId => read('returns').filter(r => r.saleId === saleId),
+
+    // إنشاء مرتجع جديد
+    // items: [{ productId, nameAr, qty, price, total, restoreStock }]
+    create: (data) => {
+      const list    = read('returns');
+      const returns = read('returns');
+
+      const ret = {
+        id:            uid(),
+        returnNo:      'RET-' + String(list.length + 1).padStart(5, '0'),
+        saleId:        data.saleId        || null,
+        invoiceNo:     data.invoiceNo     || '',
+        customerId:    data.customerId    || null,
+        customerName:  data.customerName  || 'زبون عام',
+        items:         data.items         || [],
+        totalRefund:   data.totalRefund   || 0,
+        reason:        data.reason        || '',
+        refundMethod:  data.refundMethod  || 'cash',   // cash | credit_note
+        date:          now(),
+        createdAt:     now()
+      };
+
+      // إعادة المخزون للمنتجات المُرتجعة
+      ret.items.forEach(it => {
+        if (it.restoreStock !== false) {
+          Products.adjustStock(it.productId, it.qty);
+        }
+      });
+
+      // إذا كان الزبون مسجلاً وطريقة الاسترداد نقدية → اخصم من totalBought
+      if (ret.customerId) {
+        const custs = read('customers');
+        const ci = custs.findIndex(c => c.id === ret.customerId);
+        if (ci >= 0) {
+          custs[ci].totalBought = Math.max(0, (custs[ci].totalBought || 0) - ret.totalRefund);
+          // إذا كانت الفاتورة الأصلية آجلة → خصم الدين أيضاً
+          if (data.originalPaymentMethod === 'credit') {
+            custs[ci].debt = Math.max(0, (custs[ci].debt || 0) - ret.totalRefund);
+          }
+          write('customers', custs);
+        }
+      }
+
+      list.push(ret);
+      write('returns', list);
+      return ret;
+    },
+
+    // حذف مرتجع (يعكس المخزون)
+    delete: id => {
+      const ret = read('returns').find(r => r.id === id);
+      if (!ret) return;
+      // إعادة المخزون للوضع السابق
+      ret.items.forEach(it => {
+        if (it.restoreStock !== false) Products.adjustStock(it.productId, -it.qty);
+      });
+      // إعادة totalBought للزبون
+      if (ret.customerId) {
+        const custs = read('customers');
+        const ci = custs.findIndex(c => c.id === ret.customerId);
+        if (ci >= 0) {
+          custs[ci].totalBought = (custs[ci].totalBought || 0) + ret.totalRefund;
+          write('customers', custs);
+        }
+      }
+      write('returns', read('returns').filter(r => r.id !== id));
+    },
+
+    // إحصائيات سريعة
+    stats: () => {
+      const all = read('returns');
+      return {
+        count:       all.length,
+        totalRefund: all.reduce((a, r) => a + r.totalRefund, 0)
+      };
+    }
+  };
+
   function exportData() {
     const data = {
       version: '1.0', exportedAt: now(),
@@ -460,6 +579,8 @@ const DB = (() => {
       sale_items: read('sale_items'), purchases: read('purchases'),
       suppliers: read('suppliers'),
       debt_payments: read('debt_payments'),
+      stock_adjustments: read('stock_adjustments'),
+      returns:           read('returns'),
       settings: Settings.get()
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -482,8 +603,10 @@ const DB = (() => {
         if (data.sales)      write('sales', data.sales);
         if (data.sale_items) write('sale_items', data.sale_items);
         if (data.purchases)  write('purchases', data.purchases);
-        if (data.suppliers)     write('suppliers',     data.suppliers);
-        if (data.debt_payments) write('debt_payments', data.debt_payments);
+        if (data.suppliers)          write('suppliers',          data.suppliers);
+        if (data.debt_payments)      write('debt_payments',      data.debt_payments);
+        if (data.stock_adjustments)  write('stock_adjustments',  data.stock_adjustments);
+        if (data.returns)            write('returns',            data.returns);
         if (data.settings)      write('settings',      data.settings);
         if (typeof toast === 'function') toast('تم الاستيراد بنجاح! جارٍ إعادة التحميل... / Import success!', 'success');
         setTimeout(() => location.reload(), 1500);
@@ -510,6 +633,6 @@ const DB = (() => {
   }
 
   return { Settings, Categories, Products, Suppliers, Customers,
-           DebtPayments, Sales, Purchases,
+           DebtPayments, Sales, Purchases, StockAdjustments, Returns,
            exportData, importData, resetAll, stats, uid, today, now };
 })();
