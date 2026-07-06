@@ -1488,6 +1488,12 @@ function printInvoice() {
     .inv-paper-footer { text-align:center; padding-top:16px; border-top:1px dashed #e5e7eb; }
     .inv-barcode-line { font-family:monospace; font-size:11px; color:#9ca3af; letter-spacing:3px; margin-bottom:8px; }
     .inv-footer-thanks { font-size:13px; color:#6b7280; margin:0; }
+
+    @media (max-width: 480px) {
+      .inv-paper-inner { padding:18px 14px; }
+      .inv-logo-icon, .inv-logo-img-wrap { width:40px; height:40px; font-size:18px; }
+      .inv-store-name { font-size:16px; }
+    }
   `;
 
   const win = window.open('', '_blank', 'width=794,height=1123');
