@@ -860,6 +860,29 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
   .settings-grid { grid-template-columns:1fr; }
   .main { padding:16px; }
 }
+/* ─── Invoice Preview Modal — Mobile ─────────────────────────────
+   على الهواتف: الشريط الجانبي (200px) كان يضغط منطقة الفاتورة، فيبدو
+   الشعار كبيراً وغير متناسب. هنا نجعل الشريط أفقياً في الأعلى ونمنح
+   منطقة الفاتورة كامل العرض، مع تصغير الشعار وحشوة الفاتورة. */
+@media (max-width: 760px) {
+  .invoice-preview-wrapper { flex-direction:column; width:97vw; max-height:95vh; }
+  .inv-sidebar-controls {
+    width:100%; min-width:0; flex-direction:row; flex-wrap:wrap;
+    align-items:center; padding:12px; gap:10px;
+    border-left:none; border-bottom:1px solid #1f2937;
+  }
+  .inv-ctrl-brand { padding-bottom:0; border-bottom:none; flex-basis:100%; }
+  .inv-ctrl-actions { flex-direction:row; flex:1; flex-wrap:wrap; gap:8px; }
+  .inv-ctrl-btn { width:auto; flex:1; min-width:88px; }
+  .inv-ctrl-meta { margin-top:0; padding-top:0; border-top:none; flex-direction:row; flex-wrap:wrap; gap:8px; }
+  .invoice-paper { padding:14px; }
+  .inv-paper-inner { padding:20px 16px; }
+  .inv-paper-header { flex-wrap:wrap; gap:10px; }
+  .inv-logo-icon, .inv-logo-img-wrap { width:40px; height:40px; font-size:18px; }
+  .inv-paper-store { padding:0 10px; min-width:0; }
+  .inv-store-name { font-size:16px; }
+  .inv-paper-meta { flex-basis:100%; text-align:center; }
+}
 /* ─── Weight Modal (⚖️ ميزان) ──────────────────────────────────── */
 .wi-mode-btn {
   flex:1; padding:10px 6px; border:2px solid var(--border2);
