@@ -164,6 +164,20 @@
           <div class="kpi-label">فواتير اليوم / Today Invoices</div>
         </div>
       </div>
+      <div class="kpi-card kpi-expiry">
+        <div class="kpi-icon"><i class="fas fa-hourglass-half"></i></div>
+        <div class="kpi-info">
+          <div class="kpi-value" id="kpi-expiry">0</div>
+          <div class="kpi-label">قرب انتهاء الصلاحية / Expiring Soon</div>
+        </div>
+      </div>
+      <div class="kpi-card kpi-expired">
+        <div class="kpi-icon"><i class="fas fa-skull-crossbones"></i></div>
+        <div class="kpi-info">
+          <div class="kpi-value" id="kpi-expired">0</div>
+          <div class="kpi-label">منتهية الصلاحية / Expired</div>
+        </div>
+      </div>
     </div>
 
     <div class="dash-grid">
@@ -185,6 +199,13 @@
       <div class="dash-card">
         <div class="card-title"><i class="fas fa-triangle-exclamation"></i> تنبيهات المخزون / Stock Alerts</div>
         <div id="stock-alerts-list"></div>
+      </div>
+    </div>
+
+    <div class="dash-grid">
+      <div class="dash-card full-width">
+        <div class="card-title"><i class="fas fa-hourglass-half"></i> تنبيهات انتهاء الصلاحية / Expiry Alerts</div>
+        <div id="expiry-alerts-list"></div>
       </div>
     </div>
 
@@ -230,7 +251,8 @@
         <thead><tr>
           <th>#</th><th>المنتج / Product</th><th>الباركود / Barcode</th>
           <th>الفئة / Category</th><th>سعر الشراء / Buy</th><th>سعر البيع / Sell</th>
-          <th>المخزون / Stock</th><th>الحد الأدنى / Min</th><th>الحالة / Status</th><th>إجراءات / Actions</th>
+          <th>المخزون / Stock</th><th>الحد الأدنى / Min</th><th>الحالة / Status</th>
+          <th>الصلاحية / Expiry</th><th>إجراءات / Actions</th>
         </tr></thead>
         <tbody id="products-body"></tbody>
       </table>
@@ -275,15 +297,20 @@
             <input type="number" id="pos-discount" value="0" min="0" oninput="updateTotals()"/> <span>%</span>
           </div>
           <div class="total-row grand"><span>الإجمالي / Total</span><span id="pos-total">0.00 دج</span></div>
+          <div class="total-row split-row" id="pos-split-row" style="display:none">
+            <span><i class="fas fa-money-bill"></i> نقدي / آجل</span>
+            <span><strong id="pos-cash-part">0.00 دج</strong> / <strong id="pos-credit-part" class="credit-part">0.00 دج</strong></span>
+          </div>
           <div class="total-row profit-row"><span>الربح / Profit</span><span id="pos-profit">0.00 دج</span></div>
         </div>
         <div class="pos-payment">
-          <label>طريقة الدفع / Payment</label>
+          <label>طريقة الدفع الافتراضية / Default Payment</label>
           <div class="payment-methods">
             <button class="pay-btn active" data-method="cash"><i class="fas fa-money-bill"></i> نقدي / Cash</button>
             <button class="pay-btn" data-method="card"><i class="fas fa-credit-card"></i> بطاقة / Card</button>
             <button class="pay-btn" data-method="credit"><i class="fas fa-clock"></i> آجل / Credit</button>
           </div>
+          <p class="pos-payment-hint"><i class="fas fa-circle-info"></i> يحدّد طريقة الدفع للمنتجات الجديدة المضافة للسلة — يمكنك تغيير حالة كل منتج على حدة (نقدي/آجل) من داخل السلة نفسها لتقسيم فاتورة واحدة بين دفعتين.</p>
         </div>
         <div class="pos-actions">
           <button class="btn-clear" onclick="clearCart()"><i class="fas fa-trash"></i> مسح / Clear</button>
@@ -374,10 +401,12 @@
   <div class="page" id="page-customers">
     <div class="page-header">
       <h1>الزبائن <span>Customers</span></h1>
-      <button class="btn-primary" onclick="openModal('modal-customer')"><i class="fas fa-plus"></i> إضافة زبون</button>
+      <button class="btn-primary" onclick="openAddCustomerModal()"><i class="fas fa-plus"></i> إضافة زبون</button>
     </div>
     <!-- KPI ديون سريع -->
     <div class="kpi-grid" id="cust-kpi-grid" style="margin-bottom:20px"></div>
+    <!-- تصنيف الزبائن: شريط توزيع قابل للنقر للتصفية السريعة -->
+    <div class="cust-tier-stats" id="cust-tier-stats"></div>
     <div class="filter-bar">
       <input type="text" placeholder="بحث بالاسم أو الهاتف..." id="cust-search" oninput="renderCustomers()"/>
       <select id="cust-debt-filter" onchange="renderCustomers()">
@@ -385,12 +414,20 @@
         <option value="debt">لديهم ديون</option>
         <option value="clear">مسدّدون</option>
       </select>
+      <select id="cust-tier-filter" onchange="renderCustomers()">
+        <option value="">كل التصنيفات</option>
+        <option value="vip">ماسي / VIP</option>
+        <option value="gold">ذهبي</option>
+        <option value="silver">فضي</option>
+        <option value="regular">عادي</option>
+        <option value="new">جديد</option>
+      </select>
       <button class="btn-secondary" onclick="renderCustomers()"><i class="fas fa-filter"></i></button>
     </div>
     <div class="table-wrap">
       <table class="data-table">
         <thead><tr>
-          <th>#</th><th>الاسم</th><th>الهاتف</th>
+          <th>#</th><th>الاسم</th><th>الهاتف</th><th>التصنيف</th>
           <th>الدين المتبقي</th><th>مجموع الشراء</th><th>آخر سداد</th><th>إجراءات</th>
         </tr></thead>
         <tbody id="customers-body"></tbody>
@@ -412,7 +449,18 @@
         <option value="cash">نقدي / Cash</option>
         <option value="card">بطاقة / Card</option>
         <option value="credit">آجل / Credit</option>
+        <option value="mixed">نقدي + آجل / Split</option>
       </select>
+      <div class="inv-barcode-search-wrap">
+        <i class="fas fa-barcode"></i>
+        <input type="text" id="inv-barcode-search" placeholder="امسح الباركود أو أدخل رقم الفاتورة... / Scan barcode or enter invoice #"
+          oninput="renderInvoices()" onkeydown="invBarcodeKeydown(event)"/>
+      </div>
+      <div class="inv-barcode-search-wrap">
+        <i class="fas fa-user"></i>
+        <input type="text" id="inv-customer-search" placeholder="ابحث باسم الزبون... / Search by customer name"
+          oninput="renderInvoices()"/>
+      </div>
       <button class="btn-secondary" onclick="renderInvoices()"><i class="fas fa-filter"></i> تصفية</button>
     </div>
     <div class="table-wrap">
@@ -433,7 +481,11 @@
   <div class="page" id="page-reports">
     <div class="page-header">
       <h1>التقارير <span>Reports</span></h1>
-      <button class="btn-primary" onclick="printReport()"><i class="fas fa-print"></i> طباعة / Print</button>
+      <div class="report-actions">
+        <button class="btn-secondary" onclick="exportReportExcel()"><i class="fas fa-file-excel"></i> حفظ Excel</button>
+        <button class="btn-secondary" onclick="exportReportPDF(this)"><i class="fas fa-file-pdf"></i> حفظ PDF</button>
+        <button class="btn-primary" onclick="printReport()"><i class="fas fa-print"></i> طباعة / Print</button>
+      </div>
     </div>
     <div class="report-period">
       <label>من / From:</label><input type="date" id="rep-from"/>
@@ -449,6 +501,26 @@
       <div class="dash-card">
         <div class="card-title">أفضل المنتجات / Top Products</div>
         <div id="report-top-products"></div>
+      </div>
+    </div>
+    <div class="dash-grid">
+      <div class="dash-card">
+        <div class="card-title"><i class="fas fa-wallet"></i> طرق الدفع والديون / Payment &amp; Debt</div>
+        <div id="report-payment-methods"></div>
+      </div>
+      <div class="dash-card">
+        <div class="card-title"><i class="fas fa-layer-group"></i> المبيعات حسب الفئة / Sales by Category</div>
+        <div id="report-categories"></div>
+      </div>
+    </div>
+    <div class="dash-grid">
+      <div class="dash-card">
+        <div class="card-title"><i class="fas fa-crown"></i> أفضل الزبائن / Top Customers</div>
+        <div id="report-top-customers"></div>
+      </div>
+      <div class="dash-card">
+        <div class="card-title"><i class="fas fa-rotate-left"></i> المرتجعات والمشتريات / Returns &amp; Purchases</div>
+        <div id="report-returns-purchases"></div>
       </div>
     </div>
     <div class="dash-card full-width">
@@ -495,6 +567,10 @@
           <label>حد المخزون المنخفض / Low Stock Threshold</label>
           <input type="number" id="set-low-stock" value="5" min="1"/>
         </div>
+        <div class="form-group">
+          <label>تنبيه قبل انتهاء الصلاحية بـ (أيام) / Expiry Warning (days)</label>
+          <input type="number" id="set-expiry-days" value="15" min="1"/>
+        </div>
         <button class="btn-primary" onclick="saveSettings()"><i class="fas fa-save"></i> حفظ / Save</button>
       </div>
 
@@ -520,6 +596,25 @@
           <label>عبارة الشكر / الترحيب (أسفل الفاتورة)</label>
           <input type="text" id="set-thanks" placeholder="شكراً لتعاملكم معنا 🙏"/>
         </div>
+        <button class="btn-primary" onclick="saveSettings()"><i class="fas fa-save"></i> حفظ / Save</button>
+      </div>
+
+      <div class="settings-card">
+        <h3><i class="fas fa-ranking-star"></i> تصنيف الزبائن / Customer Tiers</h3>
+        <p class="setting-desc">يُصنَّف كل زبون تلقائياً حسب إجمالي مشترياته. حدّد الحد الأدنى لكل مستوى (يجب أن تكون: فضي &lt; ذهبي &lt; ماسي).</p>
+        <div class="form-group">
+          <label><i class="fas fa-medal" style="color:var(--blue)"></i> فضي — الحد الأدنى</label>
+          <input type="number" id="set-tier-silver" value="5000" min="0"/>
+        </div>
+        <div class="form-group">
+          <label><i class="fas fa-award" style="color:var(--gold)"></i> ذهبي — الحد الأدنى</label>
+          <input type="number" id="set-tier-gold" value="20000" min="0"/>
+        </div>
+        <div class="form-group">
+          <label><i class="fas fa-gem" style="color:#8b5cf6"></i> ماسي / VIP — الحد الأدنى</label>
+          <input type="number" id="set-tier-vip" value="50000" min="0"/>
+        </div>
+        <p class="setting-desc">الزبون بدون أي مشتريات يُصنَّف تلقائياً "جديد"، وما دون حد الفضي يُصنَّف "عادي".</p>
         <button class="btn-primary" onclick="saveSettings()"><i class="fas fa-save"></i> حفظ / Save</button>
       </div>
 
@@ -563,7 +658,10 @@
     <div class="filter-bar">
       <input type="date" id="ret-date-from"/>
       <input type="date" id="ret-date-to"/>
-      <input type="text" id="ret-search" placeholder="بحث بالمرتجع أو الزبون..." oninput="renderReturns()"/>
+      <div class="inv-barcode-search-wrap">
+        <i class="fas fa-barcode"></i>
+        <input type="text" id="ret-search" placeholder="امسح الباركود أو ابحث بالمرتجع/الفاتورة/الزبون..." oninput="renderReturns()" onkeydown="retListKeydown(event)"/>
+      </div>
       <button class="btn-secondary" onclick="renderReturns()"><i class="fas fa-filter"></i> تصفية</button>
     </div>
 
@@ -632,6 +730,7 @@
         <label>سبب التسوية / Reason</label>
         <select id="adj-reason">
           <option value="جرد يدوي">جرد يدوي / Manual Count</option>
+          <option value="انتهاء الصلاحية">انتهاء الصلاحية / Expired</option>
           <option value="تلف">تلف / Damaged</option>
           <option value="فقدان">فقدان / Lost</option>
           <option value="تصحيح خطأ">تصحيح خطأ / Correction</option>
@@ -703,15 +802,21 @@
           <input type="number" id="prod-min" placeholder="5"/>
         </div>
       </div>
-      <div class="form-group">
-        <label>الوحدة / Unit</label>
-        <select id="prod-unit">
-          <option value="قطعة">قطعة / Piece</option>
-          <option value="كغ">كغ / Kg</option>
-          <option value="لتر">لتر / Liter</option>
-          <option value="علبة">علبة / Box</option>
-          <option value="كيس">كيس / Bag</option>
-        </select>
+      <div class="form-row">
+        <div class="form-group">
+          <label>الوحدة / Unit</label>
+          <select id="prod-unit">
+            <option value="قطعة">قطعة / Piece</option>
+            <option value="كغ">كغ / Kg</option>
+            <option value="لتر">لتر / Liter</option>
+            <option value="علبة">علبة / Box</option>
+            <option value="كيس">كيس / Bag</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>تاريخ انتهاء الصلاحية / Expiry Date <small style="color:#6b7280;font-weight:400">(اختياري)</small></label>
+          <input type="date" id="prod-expiry"/>
+        </div>
       </div>
       <!-- hint for weighable products -->
       <div id="weight-hint" style="display:none;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:10px 14px;margin-top:4px;">
@@ -847,6 +952,7 @@
       <button onclick="closeModal('modal-customer')"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="modal-body">
+      <div class="cust-tier-info-box" id="cust-tier-info-box"></div>
       <input type="hidden" id="cust-id"/>
       <div class="form-row">
         <div class="form-group">
@@ -1039,9 +1145,9 @@
     <div class="modal-body">
       <!-- ابحث عن الفاتورة -->
       <div class="form-group">
-        <label><i class="fas fa-file-invoice"></i> رقم الفاتورة / Invoice No</label>
+        <label><i class="fas fa-barcode"></i> رقم الفاتورة / Invoice No — امسح الباركود أو ابحث يدوياً</label>
         <div style="display:flex;gap:8px">
-          <input type="text" id="ret-inv-input" placeholder="INV-00001 أو ابحث..." style="flex:1" oninput="retSearchInvoice()"/>
+          <input type="text" id="ret-inv-input" placeholder="امسح باركود الفاتورة أو اكتب INV-00001..." style="flex:1" oninput="retSearchInvoice()" onkeydown="retInvKeydown(event)"/>
           <button class="btn-secondary" onclick="retSearchInvoice()"><i class="fas fa-magnifying-glass"></i></button>
         </div>
         <div id="ret-inv-results" class="ret-inv-results"></div>
@@ -1155,8 +1261,13 @@
 <div class="toast-container" id="toast-container"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <script src="license.js"></script>
 <script src="database.js"></script>
+<script src="barcode.js"></script>
+<script src="camera-scanner.js"></script>
 <script src="backup.js"></script>
 <script src="csv-import.js"></script>
 <script src="script.js"></script>
