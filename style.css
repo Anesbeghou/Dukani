@@ -177,6 +177,7 @@ body {
   margin-right: 10px; font-family: 'Inter'; letter-spacing: 1px;
 }
 .page-meta { font-size: 13px; color: var(--text3); }
+.report-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 /* ─── KPI CARDS ──────────────────────────────────────────────── */
 .kpi-grid {
@@ -204,8 +205,45 @@ body {
 .kpi-customers.kpi-icon, .kpi-customers .kpi-icon { background:#8b5cf620; color:#8b5cf6; }
 .kpi-low      .kpi-icon { background:#ef444420; color:var(--red); }
 .kpi-invoices .kpi-icon { background:#0ea5e920; color:#0ea5e9; }
+.kpi-expiry   .kpi-icon { background:#f9731620; color:#f97316; }
+.kpi-expired  .kpi-icon { background:#ef444420; color:var(--red); }
 .kpi-value { font-size: 22px; font-weight: 900; color: var(--text); line-height:1; }
 .kpi-label { font-size: 12px; color: var(--text3); margin-top: 4px; }
+.kpi-delta {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 700; margin-top: 6px;
+  padding: 2px 8px; border-radius: 20px;
+}
+.kpi-delta.up   { color: var(--accent); background: #10b98120; }
+.kpi-delta.down { color: var(--red);    background: #ef444420; }
+.kpi-delta.flat { color: var(--text3);  background: var(--surface2); }
+.kpi-delta i { font-size: 9px; }
+
+/* ─── BREAKDOWN ROWS (payment methods / categories) ─────────────── */
+.breakdown-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.breakdown-row:last-child { border-bottom: none; }
+.breakdown-top {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px; font-size: 13.5px;
+}
+.breakdown-label { color: var(--text); font-weight: 600; display:flex; align-items:center; gap:6px; }
+.breakdown-count { color: var(--text3); font-size: 12px; font-weight: 400; }
+.breakdown-value { color: var(--gold); font-weight: 700; }
+.breakdown-bar {
+  height: 6px; background: var(--surface2); border-radius: 6px; overflow: hidden;
+}
+.breakdown-bar-fill {
+  height: 100%; border-radius: 6px; background: var(--accent-g);
+}
+
+/* ─── MINI STATS (returns / purchases summary) ──────────────────── */
+.report-mini-stat {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 11px 0; border-bottom: 1px solid var(--border); font-size: 13.5px;
+}
+.report-mini-stat:last-child { border-bottom: none; }
+.report-mini-stat span { color: var(--text3); display:flex; align-items:center; gap:8px; }
+.report-mini-stat strong { color: var(--text); font-weight: 800; }
 
 /* ─── DASH CARDS ─────────────────────────────────────────────── */
 .dash-grid {
@@ -272,6 +310,37 @@ body {
   display:inline-flex;align-items:center;gap:4px;
 }
 .row-debt { background:rgba(239,68,68,.04); }
+
+/* ─── تصنيف الزبائن (Customer Tiers) ─────────────────────────────────────── */
+.cust-tier-badge {
+  display:inline-flex; align-items:center; gap:5px;
+  padding:4px 10px; border-radius:20px;
+  font-size:12px; font-weight:700; white-space:nowrap;
+}
+.cust-tier-stats {
+  display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px;
+}
+.cust-tier-chip {
+  display:inline-flex; align-items:center; gap:6px;
+  padding:8px 14px; border-radius:10px;
+  background:var(--surface2); border:1px solid var(--border2);
+  color:var(--text2); font-family:'Cairo',sans-serif; font-size:13px; font-weight:600;
+  cursor:pointer; transition:.15s;
+}
+.cust-tier-chip i { color:var(--tier-color); }
+.cust-tier-chip strong { color:var(--text); font-size:14px; }
+.cust-tier-chip:hover { border-color:var(--tier-color); color:var(--text); }
+.cust-tier-chip.active {
+  background:color-mix(in srgb, var(--tier-color) 16%, var(--surface2));
+  border-color:var(--tier-color); color:var(--text);
+}
+.cust-tier-info-box {
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  background:var(--surface2); border:1px solid var(--border2);
+  border-radius:10px; padding:10px 14px; margin-bottom:16px;
+}
+.cust-tier-info-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.cust-tier-info-note { font-size:12px; color:var(--text2); }
 .row-debt:hover { background:rgba(239,68,68,.08) !important; }
 
 /* ── Pay button icon ── */
@@ -380,6 +449,7 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
 .pay-cash   { background:#10b98120;color:var(--accent); }
 .pay-card   { background:#3b82f620;color:var(--blue); }
 .pay-credit { background:#f59e0b20;color:var(--gold); }
+.pay-mixed  { background:linear-gradient(90deg,#10b98120 50%,#f59e0b20 50%);color:#0f766e; }
 
 /* ─── BUTTONS ────────────────────────────────────────────────── */
 .btn-primary {
@@ -430,6 +500,18 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
 .filter-bar input:focus, .filter-bar select:focus { border-color:var(--accent); }
 .filter-bar input[type="text"] { min-width:220px; }
 
+/* ─── مربع بحث/مسح الباركود (الفواتير والمرتجعات) ───────────────── */
+.inv-barcode-search-wrap {
+  display:flex;align-items:center;gap:10px;flex:1;min-width:240px;
+  background:var(--surface);border:1px solid var(--border2);
+  border-radius:var(--radius-sm);padding:9px 14px;
+}
+.inv-barcode-search-wrap i { color:var(--text3); }
+.inv-barcode-search-wrap input {
+  flex:1;background:none;border:none;outline:none;
+  color:var(--text);font-family:'Cairo',sans-serif;font-size:13px;
+}
+
 /* ─── FORMS ──────────────────────────────────────────────────── */
 .form-group { display:flex;flex-direction:column;gap:6px;margin-bottom:14px; }
 .form-group label { font-size:12px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.5px; }
@@ -475,7 +557,7 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
 
 /* ─── POS ────────────────────────────────────────────────────── */
 .pos-layout {
-  display:grid;grid-template-columns:1fr 380px;gap:20px;
+  display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2.6fr);gap:16px;
   height:calc(100vh - var(--topbar-h) - 110px);
 }
 .pos-left  { display:flex;flex-direction:column;gap:12px;overflow:hidden; }
@@ -483,6 +565,32 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
   background:var(--surface);border:1px solid var(--border);
   border-radius:var(--radius);padding:20px;
   display:flex;flex-direction:column;gap:14px;overflow-y:auto;
+  height:100%;box-sizing:border-box;
+}
+
+/* ─── تكبير عرض + أحجام العناصر ≥ 1400px ─────────────────── */
+@media (min-width: 1400px) {
+  .pos-layout { grid-template-columns:minmax(0,1fr) minmax(0,2.8fr); }
+  .pos-totals { padding:18px 20px; }
+  .total-row { font-size:16px;padding:7px 0; }
+  .total-row.grand { font-size:22px;margin-top:8px;padding-top:12px; }
+  .pay-btn { padding:12px;font-size:14px; }
+  .btn-checkout,.btn-clear { padding:16px;font-size:16px; }
+  .pos-cart .cart-item { font-size:15px;padding:13px 0; }
+  .cart-item-total { font-size:16px; }
+  .cart-item-controls button { width:32px;height:32px;font-size:14px; }
+  .discount-row input { width:80px;font-size:15px;padding:6px 10px; }
+}
+
+@media (min-width: 1700px) {
+  .pos-layout { grid-template-columns:minmax(0,1fr) minmax(0,3fr); }
+  .pos-totals { padding:22px 24px; }
+  .total-row { font-size:18px;padding:9px 0; }
+  .total-row.grand { font-size:26px;margin-top:10px;padding-top:14px; }
+  .pay-btn { padding:14px;font-size:16px; }
+  .btn-checkout,.btn-clear { padding:18px;font-size:18px; }
+  .pos-cart .cart-item { font-size:16px;padding:15px 0; }
+  .cart-item-total { font-size:18px; }
 }
 .pos-search-bar {
   display:flex;align-items:center;gap:10px;
@@ -507,6 +615,8 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
 .pos-products-grid {
   display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
   gap:12px;overflow-y:auto;align-content:start;
+  /* على الحاسوب: صفان فقط ثم تمرير */
+  max-height: calc(272px);
 }
 .pos-prod-card {
   background:var(--surface);border:1px solid var(--border);
@@ -529,7 +639,7 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
   font-family:'Cairo',sans-serif;font-size:13px;outline:none;
 }
 
-.pos-cart { flex:1;overflow-y:auto;min-height:80px; }
+.pos-cart { flex:1;overflow-y:auto;min-height:0; }
 .cart-empty { text-align:center;padding:24px;color:var(--text3);font-size:14px; }
 .cart-item {
   display:flex;align-items:center;gap:10px;
@@ -549,6 +659,25 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
 .cart-item-controls span { min-width:24px;text-align:center;font-weight:700; }
 .remove-btn { background:var(--red)20!important;color:var(--red)!important; }
 .cart-item-total { font-weight:700;color:var(--accent);font-size:14px;min-width:70px;text-align:left; }
+
+/* منتج مدفوع آجلاً داخل السلة */
+.cart-item.cart-item-credit { background:rgba(245,158,11,.07);border-radius:8px;padding-right:6px;padding-left:6px; }
+.item-pay-toggle {
+  display:inline-flex;align-items:center;gap:4px;
+  border:1px solid var(--border2);background:var(--surface);color:var(--accent);
+  border-radius:16px;padding:4px 9px;font-size:11px;font-weight:700;
+  cursor:pointer;white-space:nowrap;font-family:'Cairo',sans-serif;transition:.15s;
+}
+.item-pay-toggle:hover { border-color:var(--accent); }
+.item-pay-toggle.is-credit { background:#f59e0b20;color:var(--gold);border-color:#f59e0b55; }
+
+/* سطر تفصيل نقدي/آجل في إجماليات السلة */
+.total-row.split-row { color:var(--text2);font-size:12px;padding-top:2px;padding-bottom:6px; }
+.total-row.split-row .credit-part { color:var(--gold); }
+.pos-payment-hint { font-size:11px;color:var(--text3);margin:8px 2px 0;line-height:1.6; }
+
+/* تفصيل نقدي/آجل داخل إيصال البيع السريع */
+.receipt-split { display:flex;justify-content:space-between;gap:10px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:8px;color:var(--text2); }
 
 .pos-totals { background:var(--surface2);border-radius:var(--radius-sm);padding:14px; }
 .total-row { display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:14px; }
@@ -687,6 +816,7 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
 .inv-meta-chip.pay-cash   { color:#10b981; }
 .inv-meta-chip.pay-card   { color:#3b82f6; }
 .inv-meta-chip.pay-credit { color:#f59e0b; }
+.inv-meta-chip.pay-mixed  { color:#0d9488; }
 
 /* ── Paper / printable area ── */
 .invoice-paper {
@@ -735,6 +865,8 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
 .inv-pay-badge.pay-cash   { background:#dcfce7;color:#059669; }
 .inv-pay-badge.pay-card   { background:#dbeafe;color:#2563eb; }
 .inv-pay-badge.pay-credit { background:#fef3c7;color:#d97706; }
+.inv-pay-badge.pay-mixed  { background:linear-gradient(90deg,#dcfce7 50%,#fef3c7 50%);color:#0d9488; }
+.inv-item-credit-tag { display:inline-block;background:#fef3c7;color:#d97706;font-size:10px;font-weight:800;border-radius:4px;padding:1px 6px;margin-right:4px;vertical-align:middle; }
 
 /* ── Invoice table ── */
 .inv-paper-table {
@@ -770,7 +902,9 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
 
 /* ── Footer ── */
 .inv-paper-footer { text-align:center;padding-top:16px;border-top:1px dashed #e5e7eb; }
-.inv-barcode-line { font-family:monospace;font-size:11px;color:#9ca3af;letter-spacing:3px;margin-bottom:8px; }
+.inv-barcode-wrap { display:flex;flex-direction:column;align-items:center;margin-bottom:10px; }
+.inv-barcode-wrap svg { max-width:220px; }
+.inv-barcode-line { font-family:monospace;font-size:11px;color:#9ca3af;letter-spacing:3px;margin-top:2px; }
 .inv-footer-thanks { font-size:13px;color:#6b7280;margin:0; }
 .inv-footer-credit { font-size:11px;color:#9ca3af;margin:4px 0 0; }
 
@@ -788,6 +922,8 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
 .receipt-body { padding:8px 24px 20px; }
 .receipt-success-icon { text-align:center;font-size:52px;color:#10b981;margin-bottom:8px; }
 .receipt-inv-no { text-align:center;font-family:monospace;font-size:16px;font-weight:900;letter-spacing:2px;color:var(--text1);margin-bottom:4px; }
+.receipt-barcode { display:flex;justify-content:center;margin-bottom:10px; }
+.receipt-barcode svg { max-width:200px;background:#fff;border-radius:6px;padding:4px; }
 .receipt-customer { text-align:center;font-size:14px;color:var(--text2);margin-bottom:16px;display:flex;align-items:center;justify-content:center;gap:6px; }
 .receipt-items { border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:12px; }
 .receipt-item { display:flex;justify-content:space-between;padding:10px 14px;font-size:13px;border-bottom:1px solid var(--border); }
@@ -841,7 +977,7 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
 
 /* ─── RESPONSIVE ─────────────────────────────────────────────── */
 @media (max-width: 1100px) {
-  .pos-layout { grid-template-columns:1fr 340px; }
+  .pos-layout { grid-template-columns:minmax(0,1fr) minmax(0,2.2fr); }
   .dash-grid  { grid-template-columns:1fr; }
 }
 @media (max-width: 900px) {
@@ -851,7 +987,9 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
   .main { margin-right:0; }
   .menu-toggle { display:flex; }
   .pos-layout { grid-template-columns:1fr;height:auto; }
-  .pos-right  { max-height:none; }
+  .pos-right  { max-height:none; height:auto; }
+  .pos-products-grid { max-height:none; }
+  .pos-cart { min-height:80px; }
   .topbar-date,.search-wrap { display:none; }
 }
 @media (max-width: 600px) {
@@ -906,6 +1044,13 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
   font-size:11px; font-weight:700; margin-right:4px;
 }
 
+/* ─── زيادة الطول (الارتفاع) فقط للحاسوب — لا تغيير على الهاتف/التابلت ─── */
+@media (hover: hover) and (pointer: fine) {
+  .pos-layout { height: calc(100vh - var(--topbar-h) - 40px); }
+  /* السلة تأخذ أكبر مساحة رأسية ممكنة على الحاسوب */
+  .pos-cart { min-height: 340px; flex: 1; }
+}
+
 /* cart item weight label */
 .cart-weight-label {
   font-size:11px; color:#10b981; font-weight:600;
@@ -932,6 +1077,9 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
 }
 
 .inv-stat-card i { font-size: 26px; flex-shrink: 0; }
+
+.inv-stat-clickable { cursor: pointer; transition: border-color .15s, transform .15s; }
+.inv-stat-clickable:hover { border-color: var(--red); transform: translateY(-2px); }
 
 .inv-stat-val {
   font-size: 26px;
@@ -1161,6 +1309,14 @@ code { background:var(--surface2); padding:2px 7px; border-radius:5px; font-size
   background: rgba(239,68,68,.12); color: var(--red);
   border-radius: 20px; padding: 4px 12px; font-size: 12px; font-weight: 700;
 }
+.ret-barcode-row {
+  display: flex; flex-wrap: wrap; gap: 14px; justify-content: center;
+  align-items: flex-start; margin-bottom: 16px;
+  background: var(--surface2); border-radius: 10px; padding: 12px;
+}
+.ret-barcode-box { display:flex;flex-direction:column;align-items:center;gap:4px; }
+.ret-barcode-box svg { max-width:180px;background:#fff;border-radius:6px;padding:4px; }
+.ret-barcode-box .ret-barcode-lbl { font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.4px; }
 .ret-info-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
   margin-bottom: 16px;
