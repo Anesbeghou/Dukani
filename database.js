@@ -165,11 +165,14 @@ const DB = (() => {
       write('settings', {
         storeName: 'دكاني', address: '', phone: '',
         currency: 'دج', lowStockThreshold: 5,
+        expiryWarningDays: 15,
         logo: '', thankYouMessage: 'شكراً لتعاملكم معنا 🙏'
       });
       write('seeded', [1]);
     }
     ensureWeightCategory();
+    ensureExpirySettings();
+    ensureCustomerTierSettings();
   }
 
   // ─── Migration: ensure بالميزان category exists ────────────────────────────
@@ -179,6 +182,25 @@ const DB = (() => {
       cats.push({ id: uid(), name: 'بالميزان' });
       write('categories', cats);
     }
+  }
+
+  // ─── Migration: ensure expiryWarningDays موجود لدى المستخدمين القدامى ──────
+  function ensureExpirySettings() {
+    const s = read('settings') || {};
+    if (s.expiryWarningDays === undefined) {
+      s.expiryWarningDays = 15;
+      write('settings', s);
+    }
+  }
+
+  // ─── Migration: ensure حدود تصنيف الزبائن موجودة لدى المستخدمين القدامى ────
+  function ensureCustomerTierSettings() {
+    const s = read('settings') || {};
+    let changed = false;
+    if (s.custTierSilver === undefined) { s.custTierSilver = 5000;  changed = true; }
+    if (s.custTierGold   === undefined) { s.custTierGold   = 20000; changed = true; }
+    if (s.custTierVip    === undefined) { s.custTierVip    = 50000; changed = true; }
+    if (changed) write('settings', s);
   }
 
   // ─── SETTINGS ───────────────────────────────────────────────────────────────
@@ -195,7 +217,11 @@ const DB = (() => {
       const cat = { id: uid(), name };
       cats.push(cat); write('categories', cats); return cat;
     },
-    delete: id => write('categories', read('categories').filter(c => c.id !== id))
+    delete: id => {
+      const cat = read('categories').find(c => c.id === id);
+      if (cat && cat.name === 'بالميزان') return; // صنف محمي — لا يُحذف
+      write('categories', read('categories').filter(c => c.id !== id));
+    }
   };
 
   // ─── PRODUCTS ───────────────────────────────────────────────────────────────
@@ -229,6 +255,37 @@ const DB = (() => {
     lowStock: () => {
       const s = Settings.get();
       return read('products').filter(p => p.stock <= (s.lowStockThreshold || 5));
+    },
+
+    // ─── تواريخ الصلاحية ────────────────────────────────────────────────────
+    // عدد الأيام المتبقية حتى الانتهاء (سالب = منتهي الصلاحية بالفعل، null = لا يوجد تاريخ)
+    daysToExpiry: p => {
+      if (!p || !p.expiryDate) return null;
+      const exp = new Date(p.expiryDate + 'T00:00:00');
+      if (isNaN(exp.getTime())) return null;
+      const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+      return Math.round((exp - today0) / 86400000);
+    },
+    // المنتجات المنتهية الصلاحية فعلياً (مرتبة من الأقدم انتهاءً)
+    expired: () => {
+      const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+      return read('products')
+        .filter(p => p.expiryDate && new Date(p.expiryDate + 'T00:00:00') < today0)
+        .sort((a, b) => a.expiryDate.localeCompare(b.expiryDate));
+    },
+    // المنتجات القريبة من الانتهاء (خلال عدد الأيام المحدد في الإعدادات أو المُمرَّر يدوياً)
+    expiringSoon: days => {
+      const s = Settings.get();
+      const warnDays = days != null ? days : (s.expiryWarningDays || 15);
+      const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+      const limit = new Date(today0); limit.setDate(limit.getDate() + warnDays);
+      return read('products')
+        .filter(p => {
+          if (!p.expiryDate) return false;
+          const exp = new Date(p.expiryDate + 'T00:00:00');
+          return exp >= today0 && exp <= limit;
+        })
+        .sort((a, b) => a.expiryDate.localeCompare(b.expiryDate));
     }
   };
 
@@ -253,7 +310,11 @@ const DB = (() => {
     addTotal: (id, amount) => {
       const list = read('customers');
       const i = list.findIndex(c => c.id === id);
-      if (i > -1) { list[i].totalBought = (list[i].totalBought || 0) + amount; write('customers', list); }
+      if (i > -1) {
+        list[i].totalBought   = (list[i].totalBought || 0) + amount;
+        list[i].purchaseCount = (list[i].purchaseCount || 0) + 1; // لأجل تصنيف/ترقية الزبائن حسب عدد مرات الشراء
+        write('customers', list);
+      }
     },
     payDebt: (id, amount) => {
       const list = read('customers');
@@ -313,6 +374,14 @@ const DB = (() => {
     create: saleData => {
       const sales = read('sales');
       const items = read('sale_items');
+      const paymentMethod = saleData.paymentMethod || 'cash';
+      // المبلغ الآجل (الذي يُضاف كدين) — إن لم يُحدَّد صراحة، استنتجه من طريقة الدفع الكاملة
+      const creditAmount = saleData.creditAmount != null
+        ? saleData.creditAmount
+        : (paymentMethod === 'credit' ? saleData.total : 0);
+      const cashAmount = saleData.cashAmount != null
+        ? saleData.cashAmount
+        : (saleData.total - creditAmount);
       const sale = {
         id: uid(),
         invoiceNo: 'INV-' + String(sales.length + 1).padStart(5, '0'),
@@ -323,7 +392,9 @@ const DB = (() => {
         discount: saleData.discount || 0,
         total: saleData.total,
         profit: saleData.profit,
-        paymentMethod: saleData.paymentMethod || 'cash',
+        paymentMethod,
+        cashAmount,
+        creditAmount,
         date: now(),
         createdAt: now()
       };
@@ -338,7 +409,7 @@ const DB = (() => {
 
       if (saleData.customerId) {
         Customers.addTotal(saleData.customerId, sale.total);
-        if (saleData.paymentMethod === 'credit') Customers.addDebt(saleData.customerId, sale.total);
+        if (creditAmount > 0) Customers.addDebt(saleData.customerId, creditAmount);
       }
       return sale;
     },
@@ -364,8 +435,12 @@ const DB = (() => {
         const custs = read('customers');
         const ci = custs.findIndex(c => c.id === sale.customerId);
         if (ci >= 0) {
-          custs[ci].totalBought = Math.max(0, (custs[ci].totalBought || 0) - sale.total);
-          if (sale.paymentMethod === 'credit') custs[ci].debt = Math.max(0, (custs[ci].debt || 0) - sale.total);
+          custs[ci].totalBought   = Math.max(0, (custs[ci].totalBought || 0) - sale.total);
+          custs[ci].purchaseCount = Math.max(0, (custs[ci].purchaseCount || 0) - 1);
+          const debtToRemove = sale.creditAmount != null
+            ? sale.creditAmount
+            : (sale.paymentMethod === 'credit' ? sale.total : 0);
+          if (debtToRemove > 0) custs[ci].debt = Math.max(0, (custs[ci].debt || 0) - debtToRemove);
           write('customers', custs);
         }
       }
@@ -454,18 +529,28 @@ const DB = (() => {
     }
   };
 
-  // ─── STOCK ADJUSTMENTS (جرد يدوي) ──────────────────────────────────────────
+  // ─── STOCK ADJUSTMENTS (جرد يدوي / تسوية المخزون) ──────────────────────────
   const StockAdjustments = {
     all: () => read('stock_adjustments'),
     add: (productId, newQty, reason, note) => {
       const list    = read('products');
       const i       = list.findIndex(p => p.id === productId);
       if (i < 0) return null;
-      const oldQty  = list[i].stock || 0;
-      const delta   = newQty - oldQty;
-      list[i].stock = newQty;
+      const oldQty    = list[i].stock || 0;
+      const delta     = newQty - oldQty;
+      const buyPrice  = list[i].buyPrice || 0;
+      list[i].stock   = newQty;
       list[i].updatedAt = now();
+
+      // إذا كان سبب التسوية انتهاء الصلاحية وأصبح الرصيد صفراً، نزيل تاريخ الصلاحية
+      // حتى لا تتكرر التنبيهات لمخزون تم التخلص منه فعلياً
+      if (reason === 'انتهاء الصلاحية' && newQty === 0) {
+        list[i].expiryDate = '';
+      }
       write('products', list);
+
+      // القيمة المالية الدقيقة للخسارة = الكمية الناقصة × سعر التكلفة (فقط عند النقصان)
+      const costImpact = delta < 0 ? Math.round(Math.abs(delta) * buyPrice * 100) / 100 : 0;
 
       const adj = {
         id: uid(),
@@ -475,6 +560,7 @@ const DB = (() => {
         oldQty,
         newQty,
         delta,
+        costImpact,
         reason: reason || 'جرد يدوي',
         note:   note   || '',
         date:   now(),
@@ -485,7 +571,19 @@ const DB = (() => {
       write('stock_adjustments', adjs);
       return adj;
     },
-    clear: () => write('stock_adjustments', [])
+    clear: () => write('stock_adjustments', []),
+    // إجمالي قيمة الخسائر المالية خلال فترة زمنية (لتقارير الخسائر)
+    totalLoss: (from, to) => {
+      return read('stock_adjustments')
+        .filter(a => (a.costImpact || 0) > 0 && (!from || a.date >= from) && (!to || a.date <= to))
+        .reduce((s, a) => s + a.costImpact, 0);
+    },
+    // إجمالي خسائر انتهاء الصلاحية تحديداً
+    expiryLoss: (from, to) => {
+      return read('stock_adjustments')
+        .filter(a => a.reason === 'انتهاء الصلاحية' && (!from || a.date >= from) && (!to || a.date <= to))
+        .reduce((s, a) => s + (a.costImpact || 0), 0);
+    }
   };
 
   // ─── RETURNS (مرتجعات) ──────────────────────────────────────────────────────
@@ -597,6 +695,13 @@ const DB = (() => {
     reader.onload = e => {
       try {
         const data = JSON.parse(e.target.result);
+        const knownKeys = ['products','categories','customers','sales','sale_items',
+          'purchases','suppliers','debt_payments','stock_adjustments','returns','settings'];
+        const hasData = knownKeys.some(k => data && data[k] !== undefined);
+        if (!hasData) {
+          if (typeof toast === 'function') toast('هذا الملف ليس نسخة بيانات دكاني صالحة / Not a valid Dakani backup file', 'error');
+          return;
+        }
         if (data.products)   write('products', data.products);
         if (data.categories) write('categories', data.categories);
         if (data.customers)  write('customers', data.customers);
