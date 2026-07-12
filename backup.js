@@ -24,7 +24,7 @@ const DakaniBackup = (() => {
     const tables = [
       'settings', 'categories', 'products', 'customers',
       'sales', 'sale_items', 'purchases', 'suppliers',
-      'debt_payments', 'stock_adjustments'
+      'debt_payments', 'stock_adjustments', 'returns'
     ];
     const snapshot = {};
     tables.forEach(t => {
@@ -53,7 +53,7 @@ const DakaniBackup = (() => {
           const tables = [
             'settings', 'categories', 'products', 'customers',
             'sales', 'sale_items', 'purchases', 'suppliers',
-            'debt_payments', 'stock_adjustments', 'seeded'
+            'debt_payments', 'stock_adjustments', 'returns', 'seeded'
           ];
           const snapshot = {
             _meta: {
@@ -136,6 +136,65 @@ const DakaniBackup = (() => {
     });
   }
 
+  // ─── دمج البيانات من ملف JSON مع البيانات الحالية (بدون حذف القديم) ─
+  // لكل جدول: نُبقي كل السجلات القديمة، ونضيف فقط السجلات الجديدة التي
+  // لا يوجد لها نفس الـ id في البيانات الحالية. لا شيء يُمحى أو يُستبدل.
+  function _mergeToIndexedDB(snapshot) {
+    return new Promise((resolve, reject) => {
+      try {
+        const req = indexedDB.open('DakaniDB', 1);
+        req.onsuccess = e => {
+          const db = e.target.result;
+          const tables = Object.keys(snapshot).filter(k => k !== '_meta');
+          if (!tables.length) { resolve(true); return; }
+
+          // 1) نقرأ أولاً البيانات الحالية من هذا الجهاز
+          const readTx = db.transaction('keyval', 'readonly');
+          const readStore = readTx.objectStore('keyval');
+          const current = {};
+          let pending = tables.length;
+
+          tables.forEach(t => {
+            const r = readStore.get('dakani_' + t);
+            r.onsuccess = () => { current[t] = r.result; if (--pending === 0) _writeMerged(); };
+            r.onerror   = () => { current[t] = undefined; if (--pending === 0) _writeMerged(); };
+          });
+
+          // 2) ندمج، ثم نكتب النتيجة النهائية فقط (لا نلمس القديم قبل حساب الدمج)
+          function _writeMerged() {
+            const writeTx = db.transaction('keyval', 'readwrite');
+            const writeStore = writeTx.objectStore('keyval');
+
+            tables.forEach(t => {
+              const oldVal = current[t];
+              const newVal = snapshot[t];
+              let merged;
+
+              if (t === 'settings') {
+                // الإعدادات: نُبقي إعدادات هذا الجهاز كما هي، ونضيف فقط
+                // أي حقل إعدادات جديد غير موجود أصلاً هنا
+                merged = Object.assign({}, newVal || {}, oldVal || {});
+              } else if (Array.isArray(newVal)) {
+                const oldArr = Array.isArray(oldVal) ? oldVal : [];
+                const existingIds = new Set(oldArr.map(item => item && item.id));
+                const additions = newVal.filter(item => !item || item.id === undefined || !existingIds.has(item.id));
+                merged = oldArr.concat(additions); // القديم أولاً + الجديد فقط
+              } else {
+                merged = oldVal !== undefined ? oldVal : newVal;
+              }
+
+              writeStore.put(merged, 'dakani_' + t);
+            });
+
+            writeTx.oncomplete = () => resolve(true);
+            writeTx.onerror    = () => reject(writeTx.error);
+          }
+        };
+        req.onerror = e => reject(e.target.error);
+      } catch(e) { reject(e); }
+    });
+  }
+
   // ─── تحقق هل تمّ النسخ اليوم ─────────────────────────────
   function _needsBackup() {
     const last = localStorage.getItem(CHECK_KEY);
@@ -172,8 +231,10 @@ const DakaniBackup = (() => {
 
   /**
    * استعادة من ملف JSON يختاره المستخدم
+   * mode = 'replace' → يستبدل كل البيانات الحالية بمحتوى الملف (الوضع القديم)
+   * mode = 'merge'   → يُبقي البيانات الحالية ويضيف إليها فقط ما هو جديد في الملف
    */
-  function restoreFromFile() {
+  function restoreFromFile(mode = 'replace') {
     const input = document.createElement('input');
     input.type  = 'file';
     input.accept = '.json';
@@ -190,18 +251,26 @@ const DakaniBackup = (() => {
         return;
       }
 
+      const isMerge = mode === 'merge';
       const confirm = window.confirm(
-        `⚠️ سيتم استعادة النسخة المؤرخة:\n${snapshot._meta.createdAt}\n\nسيُستبدل بها كل البيانات الحالية. هل تريد المتابعة؟`
+        isMerge
+          ? `📥 سيتم دمج النسخة المؤرخة:\n${snapshot._meta.createdAt}\n\nستبقى كل بياناتك الحالية كما هي، وستُضاف إليها فقط العناصر الجديدة الموجودة في الملف (بدون حذف أو استبدال أي شيء). هل تريد المتابعة؟`
+          : `⚠️ سيتم استعادة النسخة المؤرخة:\n${snapshot._meta.createdAt}\n\nسيُستبدل بها كل البيانات الحالية. هل تريد المتابعة؟`
       );
       if (!confirm) return;
 
-      showToast('⏳ جارٍ الاستعادة...', 'info');
+      showToast(isMerge ? '⏳ جارٍ الدمج...' : '⏳ جارٍ الاستعادة...', 'info');
       try {
-        await _restoreToIndexedDB(snapshot);
-        showToast('✅ تمت الاستعادة! سيُعاد تشغيل التطبيق...', 'success');
+        if (isMerge) {
+          await _mergeToIndexedDB(snapshot);
+          showToast('✅ تم الدمج بنجاح! سيُعاد تشغيل التطبيق...', 'success');
+        } else {
+          await _restoreToIndexedDB(snapshot);
+          showToast('✅ تمت الاستعادة! سيُعاد تشغيل التطبيق...', 'success');
+        }
         setTimeout(() => location.reload(), 2000);
       } catch(err) {
-        showToast('❌ فشلت الاستعادة: ' + err.message, 'error');
+        showToast('❌ فشلت العملية: ' + err.message, 'error');
       }
     };
     document.body.appendChild(input);
@@ -295,8 +364,13 @@ const DakaniBackup = (() => {
           <button class="bp-btn bp-btn-green" onclick="DakaniBackup.downloadNow()">
             <i class="fas fa-download"></i> تنزيل نسخة الآن
           </button>
-          <button class="bp-btn bp-btn-blue" onclick="DakaniBackup.restoreFromFile()">
-            <i class="fas fa-upload"></i> استعادة من ملف
+          <button class="bp-btn bp-btn-blue" onclick="DakaniBackup.restoreFromFile('replace')">
+            <i class="fas fa-upload"></i> استعادة من ملف (استبدال كامل)
+          </button>
+        </div>
+        <div class="bp-actions">
+          <button class="bp-btn bp-btn-purple" onclick="DakaniBackup.restoreFromFile('merge')">
+            <i class="fas fa-code-merge"></i> استيراد ودمج (بدون حذف القديم)
           </button>
         </div>
 
@@ -341,6 +415,7 @@ const DakaniBackup = (() => {
       }
       .bp-btn-green { background:linear-gradient(135deg,#10b981,#059669);color:#fff; }
       .bp-btn-blue  { background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff; }
+      .bp-btn-purple{ background:linear-gradient(135deg,#8b5cf6,#7c3aed);color:#fff; }
       .bp-btn:hover { opacity:.88; }
       .bp-list-title { color:#9ca3af;font-size:13px;margin-bottom:10px; }
       .bp-list { max-height:240px;overflow-y:auto; }
