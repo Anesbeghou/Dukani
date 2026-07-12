@@ -94,12 +94,17 @@ function loadDashboard() {
   const S            = DB.Settings.get();
   const cur          = S.currency || 'دج';
 
+  const expired      = DB.Products.expired();
+  const expiringSoon = DB.Products.expiringSoon();
+
   setText('kpi-sales',     fmt(todayTotal) + ' ' + cur);
   setText('kpi-profit',    fmt(todayProfit) + ' ' + cur);
   setText('kpi-products',  products.length);
   setText('kpi-customers', customers.length);
   setText('kpi-low',       low.length);
   setText('kpi-invoices',  todaySales.length);
+  setText('kpi-expiry',    expiringSoon.length);
+  setText('kpi-expired',   expired.length);
 
   // Weekly chart
   const weekly = DB.Sales.weeklySales();
@@ -130,6 +135,26 @@ function loadDashboard() {
         <span>${p.nameAr}</span>
         <span class="alert-stock">${p.stock} ${p.unit || ''}</span>
       </div>`).join('');
+  }
+
+  // Expiry alerts
+  const eaEl = document.getElementById('expiry-alerts-list');
+  if (eaEl) {
+    const expiryRows = [...expired, ...expiringSoon];
+    if (!expiryRows.length) {
+      eaEl.innerHTML = '<div class="empty-state good"><i class="fas fa-check-circle"></i> لا توجد منتجات قريبة من الانتهاء / No expiry alerts</div>';
+    } else {
+      eaEl.innerHTML = expiryRows.map(p => {
+        const info = expiryInfo(p);
+        const isExpired = info.status === 'expired';
+        return `<div class="alert-row ${isExpired ? 'alert-out' : 'alert-low'}">
+          <i class="fas fa-${isExpired ? 'skull-crossbones' : 'hourglass-half'}"></i>
+          <span>${p.nameAr}</span>
+          <span class="alert-stock">${fmtDateOnly(p.expiryDate)} — ${info.label}</span>
+          ${isExpired ? `<button class="btn-icon danger" title="تسوية الآن / Write off now" onclick="writeOffExpired('${p.id}')"><i class="fas fa-boxes-stacked"></i></button>` : ''}
+        </div>`;
+      }).join('');
+    }
   }
 
   // Recent sales
@@ -217,6 +242,10 @@ function renderProducts() {
   tbody.innerHTML = prods.length ? prods.map((p, i) => {
     const stockStatus = p.stock === 0 ? 'badge-out' : p.stock <= low ? 'badge-low' : 'badge-ok';
     const stockLabel  = p.stock === 0 ? 'نفذ' : p.stock <= low ? 'منخفض' : 'متوفر';
+    const exp = expiryInfo(p);
+    const expCell = !p.expiryDate ? '<span style="color:#6b7280">—</span>'
+      : `<span class="badge ${exp.badge}" title="${exp.label}">${fmtDateOnly(p.expiryDate)}</span>` +
+        (exp.status === 'expired' ? ` <button class="btn-icon danger" title="تسوية الآن / Write off now" onclick="writeOffExpired('${p.id}')"><i class="fas fa-boxes-stacked"></i></button>` : '');
     return `<tr>
       <td>${i+1}</td>
       <td><strong>${p.nameAr}</strong>${p.nameEn ? `<br/><small>${p.nameEn}</small>` : ''}</td>
@@ -227,21 +256,33 @@ function renderProducts() {
       <td><strong>${p.stock}</strong> ${p.unit || ''}</td>
       <td>${p.minStock || 5}</td>
       <td><span class="badge ${stockStatus}">${stockLabel}</span></td>
+      <td>${expCell}</td>
       <td>
         <button class="btn-icon edit" onclick="editProduct('${p.id}')"><i class="fas fa-pen"></i></button>
         <button class="btn-icon danger" onclick="deleteProduct('${p.id}')"><i class="fas fa-trash"></i></button>
       </td>
     </tr>`;
-  }).join('') : '<tr><td colspan="10" class="empty-td">لا توجد منتجات / No products</td></tr>';
+  }).join('') : '<tr><td colspan="11" class="empty-td">لا توجد منتجات / No products</td></tr>';
 }
 
 function openModal(id) {
   document.getElementById(id).classList.add('active');
   if (id === 'modal-product') populateProductModal();
   if (id === 'modal-purchase') populatePurchaseModal();
-  if (id === 'modal-customer') { document.getElementById('cust-id').value = ''; }
 }
 function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+
+// فتح نافذة إضافة زبون جديد بحقول فارغة وتصنيف "جديد"
+function openAddCustomerModal() {
+  document.getElementById('cust-modal-title').textContent = 'إضافة زبون / Add Customer';
+  document.getElementById('cust-id').value      = '';
+  document.getElementById('cust-name').value    = '';
+  document.getElementById('cust-phone').value   = '';
+  document.getElementById('cust-address').value = '';
+  document.getElementById('cust-notes').value   = '';
+  renderCustomerTierInfo(null);
+  openModal('modal-customer');
+}
 
 function populateProductModal(prod) {
   const cats = DB.Categories.all();
@@ -259,10 +300,11 @@ function populateProductModal(prod) {
     document.getElementById('prod-stock').value    = prod.stock;
     document.getElementById('prod-min').value      = prod.minStock || 5;
     document.getElementById('prod-unit').value     = prod.unit || 'قطعة';
+    document.getElementById('prod-expiry').value   = prod.expiryDate || '';
     toggleWeightFields();
   } else {
     document.getElementById('prod-modal-title').textContent = 'إضافة منتج / Add Product';
-    ['prod-id','prod-name-ar','prod-name-en','prod-barcode','prod-buy','prod-sell','prod-stock'].forEach(id => { document.getElementById(id).value = ''; });
+    ['prod-id','prod-name-ar','prod-name-en','prod-barcode','prod-buy','prod-sell','prod-stock','prod-expiry'].forEach(id => { document.getElementById(id).value = ''; });
     document.getElementById('prod-min').value = 5;
   }
 }
@@ -289,7 +331,8 @@ function saveProduct() {
       return u === 'بالميزان' ? (parseFloat(v) || 0) : (parseInt(v) || 0);
     })(),
     minStock:  parseInt(document.getElementById('prod-min').value) || 5,
-    unit:      document.getElementById('prod-unit').value
+    unit:      document.getElementById('prod-unit').value,
+    expiryDate: document.getElementById('prod-expiry').value || ''
   };
   if (!data.nameAr) { toast('أدخل اسم المنتج / Enter product name', 'error'); return; }
   if (data.sellPrice < data.buyPrice) { toast('سعر البيع أقل من سعر الشراء! / Sell < Buy!', 'warning'); }
@@ -395,6 +438,152 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
+// ─── ماسح الباركود الشامل (USB / بلوتوث) — يعمل من أي مكان في التطبيق ────────
+// كل قارئ باركود (USB أو Bluetooth) يعمل فعلياً كلوحة مفاتيح: يكتب رمز الباركود
+// بسرعة فائقة جداً ثم يرسل Enter. المستمعات أعلاه (pos-search, inv-barcode-search...)
+// تكفي فقط عندما يكون أحد هذه الحقول مُركَّزاً عليه (focused). هذا القسم يضيف طبقة
+// إضافية تلتقط أي مسح حتى لو لم يكن أي حقل نص مُركَّزاً عليه إطلاقاً (مثلاً بعد فتح
+// الصفحة مباشرة أو أثناء التنقّل بدون نقر داخل مربع البحث)، ويوجّه النتيجة تلقائياً
+// حسب الصفحة أو النافذة (Modal) المفتوحة حالياً — دون التأثير على أي سلوك موجود.
+(function () {
+  let buffer = '';
+  let lastTime = 0;
+  const MAX_GAP = 50; // مللي ثانية بين حرف وآخر — القارئ يكتب أسرع من أي إنسان
+  const MIN_LEN = 3;  // أقل طول مقبول لاعتباره باركود حقيقي (وليس ضغطة عرضية)
+
+  function isEditableTarget(el) {
+    if (!el) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable;
+  }
+
+  function isModalOpen(id) {
+    const el = document.getElementById(id);
+    return !!(el && el.classList.contains('active'));
+  }
+
+  function currentPage() {
+    const active = document.querySelector('.page.active');
+    return active ? active.id.replace('page-', '') : '';
+  }
+
+  // يُنفَّذ عند اكتمال مسح باركود صالح (Enter) بينما لا يوجد حقل نص مُركَّز عليه حالياً
+  function handleGlobalScan(raw) {
+    const val = raw.trim();
+    if (!val) return;
+    const upper = val.toUpperCase();
+
+    // 1) نافذة إضافة/تعديل منتج مفتوحة → عبِّئ حقل الباركود تلقائياً
+    if (isModalOpen('modal-product')) {
+      const input = document.getElementById('prod-barcode');
+      if (input) { input.value = val; toast('تم تعبئة الباركود تلقائياً ✓ / Barcode filled', 'success'); return; }
+    }
+
+    // 2) نافذة "مرتجع جديد" مفتوحة → ابحث عن الفاتورة بهذا الباركود
+    if (isModalOpen('modal-return')) {
+      const input = document.getElementById('ret-inv-input');
+      if (input) { input.value = val; retInvKeydown({ key: 'Enter' }); return; }
+    }
+
+    const page = currentPage();
+
+    // 3) صفحة نقطة البيع → أضف المنتج مباشرة للسلة (نفس منطق pos-search)
+    if (page === 'sell') {
+      const posInput = document.getElementById('pos-search');
+      const byBarcode = DB.Products.byBarcode(val);
+      if (byBarcode) {
+        addToCart(byBarcode.id);
+        if (posInput) posInput.value = '';
+        renderPOSProducts('');
+        return;
+      }
+      const results = DB.Products.search(val).filter(p => p.stock > 0);
+      if (results.length === 1) {
+        addToCart(results[0].id);
+        if (posInput) posInput.value = '';
+        renderPOSProducts('');
+        return;
+      }
+      if (results.length > 1) {
+        if (posInput) posInput.value = val;
+        renderPOSProducts(val);
+        toast(`وُجد ${results.length} منتج — اختر من القائمة / ${results.length} found, select one`, 'info');
+        return;
+      }
+      toast(`❌ باركود غير موجود: ${val} / Barcode not found`, 'error');
+      return;
+    }
+
+    // 4) صفحة الفواتير → ابحث عن الفاتورة برقمها وافتحها فوراً عند التطابق
+    if (page === 'invoices') {
+      const input = document.getElementById('inv-barcode-search');
+      if (input) { input.value = val; invBarcodeKeydown({ key: 'Enter' }); return; }
+    }
+
+    // 5) صفحة المرتجعات (بدون نافذة مفتوحة) → ابحث في قائمة المرتجعات
+    if (page === 'returns') {
+      const input = document.getElementById('ret-search');
+      if (input) { input.value = val; retListKeydown({ key: 'Enter' }); return; }
+    }
+
+    // 6) أي صفحة أخرى (لوحة التحكم، المنتجات...): جرّب مطابقة منتج، ثم فاتورة، كحل احتياطي —
+    //    مفيد عند مسح منتج من أي مكان في التطبيق للانتقال به مباشرة إلى نقطة البيع
+    const prod = DB.Products.byBarcode(val);
+    if (prod) {
+      navigateTo('sell');
+      setTimeout(() => { addToCart(prod.id); renderPOSProducts(''); }, 50);
+      return;
+    }
+    const sale = (DB.Sales.all() || []).find(s => (s.invoiceNo || '').toUpperCase() === upper);
+    if (sale) {
+      navigateTo('invoices');
+      setTimeout(() => viewInvoice(sale.id), 50);
+      return;
+    }
+
+    toast(`❌ لم يتم التعرف على الباركود: ${val} / Barcode not recognized`, 'error');
+  }
+
+  // إتاحة الدالة عالمياً — تُستخدم من ماسح الكاميرا (camera-scanner.js) لتوجيه أي
+  // رمز يتم مسحه بالكاميرا بنفس منطق قارئ الباركود الفيزيائي (USB/Bluetooth)
+  // بالضبط، دون تكرار أو تعديل أي منطق موجود.
+  window.handleGlobalScan = handleGlobalScan;
+
+  document.addEventListener('keydown', e => {
+    // إن كان التركيز داخل حقل نص/قائمة، اترك المستمعات الخاصة بكل حقل (أعلاه) تتكفل بالأمر
+    if (isEditableTarget(document.activeElement)) { buffer = ''; return; }
+
+    // تجاهل اختصارات المتصفح/النظام (Ctrl/Alt/Meta) حتى لا نتعارض معها
+    if (e.ctrlKey || e.altKey || e.metaKey) { buffer = ''; return; }
+
+    const now = Date.now();
+
+    if (e.key === 'Enter') {
+      if (buffer.length >= MIN_LEN) {
+        e.preventDefault();
+        const code = buffer;
+        buffer = '';
+        handleGlobalScan(code);
+      } else {
+        buffer = '';
+      }
+      return;
+    }
+
+    // حرف واحد قابل للطباعة فقط (رقم/حرف/رمز) — وليس مفتاح تنقّل مثل Tab/Shift/Arrow
+    if (e.key.length === 1) {
+      const isContinuation = buffer.length > 0 && (now - lastTime) <= MAX_GAP;
+      buffer = isContinuation ? buffer + e.key : e.key;
+      lastTime = now;
+      // أثناء مسح سريع فعلي، امنع أي سلوك افتراضي (مثل تمرير الصفحة بالمسافة)
+      if (isContinuation) e.preventDefault();
+    } else {
+      // أي مفتاح آخر (Shift, Tab, Arrow...) ينهي أي تجميع جارٍ لأنه ليس من القارئ
+      buffer = '';
+    }
+  });
+})();
+
 function populatePOSCustomers() {
   const sel = document.getElementById('pos-customer');
   if (!sel) return;
@@ -432,7 +621,9 @@ function addToCart(productId) {
     return;
   }
 
-  const existing = cart.find(i => i.productId === productId);
+  // كل منتج له حالة دفع خاصة به (نقدي/آجل) — لذلك لا نجمع عناصر بحالتي دفع مختلفتين معاً
+  const defaultPayType = selectedPayment === 'credit' ? 'credit' : 'cash';
+  const existing = cart.find(i => i.productId === productId && (i.payType || 'cash') === defaultPayType);
   if (existing) {
     if (existing.qty >= p.stock) { toast('لا يوجد مخزون كافٍ / Not enough stock', 'warning'); return; }
     existing.qty++;
@@ -440,7 +631,8 @@ function addToCart(productId) {
     existing.profit = (existing.price - p.buyPrice) * existing.qty;
   } else {
     cart.push({ productId: p.id, nameAr: p.nameAr, nameEn: p.nameEn, price: p.sellPrice, buyPrice: p.buyPrice,
-      qty: 1, total: p.sellPrice, profit: p.sellPrice - p.buyPrice, unit: p.unit });
+      qty: 1, total: p.sellPrice, profit: p.sellPrice - p.buyPrice, unit: p.unit,
+      payType: defaultPayType });
   }
   renderCart(); updateTotals();
 }
@@ -534,7 +726,8 @@ function confirmWeightAdd() {
     profit: profit,
     unit: 'كغ',
     isWeighed: true,
-    weightGrams: Math.round(kg * 1000)
+    weightGrams: Math.round(kg * 1000),
+    payType: selectedPayment === 'credit' ? 'credit' : 'cash'
   });
 
   closeModal('modal-weight-input');
@@ -555,21 +748,26 @@ function renderCart() {
   if (!cart.length) { el.innerHTML = '<div class="cart-empty"><i class="fas fa-cart-shopping"></i><br/>السلة فارغة / Cart is empty</div>'; updateTotals(); return; }
   const S = DB.Settings.get(); const cur = S.currency || 'دج';
   el.innerHTML = cart.map((it, i) => {
+    const isCredit = (it.payType || 'cash') === 'credit';
+    const payToggleBtn = `<button class="item-pay-toggle ${isCredit ? 'is-credit' : ''}" onclick="toggleItemPayType(${i})" title="اضغط لتغيير طريقة دفع هذا المنتج">
+        <i class="fas ${isCredit ? 'fa-clock' : 'fa-money-bill'}"></i> ${isCredit ? 'آجل' : 'نقدي'}
+      </button>`;
     if (it.isWeighed) {
       // عرض منتجات الميزان بشكل مختلف
-      return `<div class="cart-item">
+      return `<div class="cart-item ${isCredit ? 'cart-item-credit' : ''}">
         <div class="cart-item-info">
           <div class="cart-item-name">⚖️ ${it.nameAr}</div>
           <div class="cart-item-price">${fmt(it.price)} ${cur}/كغ</div>
           <div class="cart-weight-label">${it.weightGrams} غ = ${(it.qty).toFixed(3)} كغ</div>
         </div>
         <div class="cart-item-controls">
+          ${payToggleBtn}
           <button onclick="removeFromCart(${i})" title="حذف" class="remove-btn"><i class="fas fa-xmark"></i></button>
         </div>
         <div class="cart-item-total">${fmt(it.total)} ${cur}</div>
       </div>`;
     }
-    return `<div class="cart-item">
+    return `<div class="cart-item ${isCredit ? 'cart-item-credit' : ''}">
       <div class="cart-item-info">
         <div class="cart-item-name">${it.nameAr}</div>
         <div class="cart-item-price">${fmt(it.price)} ${cur}</div>
@@ -578,12 +776,21 @@ function renderCart() {
         <button onclick="changeQty(${i}, -1)"><i class="fas fa-minus"></i></button>
         <span>${it.qty}</span>
         <button onclick="changeQty(${i}, 1)"><i class="fas fa-plus"></i></button>
+        ${payToggleBtn}
         <button class="remove-btn" onclick="removeFromCart(${i})"><i class="fas fa-xmark"></i></button>
       </div>
       <div class="cart-item-total">${fmt(it.total)} ${cur}</div>
     </div>`;
   }).join('');
   updateTotals();
+}
+
+// ─── تبديل حالة الدفع لمنتج واحد داخل السلة (نقدي ⇄ آجل) ─────────────────────
+function toggleItemPayType(index) {
+  const it = cart[index];
+  if (!it) return;
+  it.payType = (it.payType || 'cash') === 'credit' ? 'cash' : 'credit';
+  renderCart();
 }
 
 function changeQty(index, delta) {
@@ -600,6 +807,13 @@ function changeQty(index, delta) {
 function removeFromCart(index) { cart.splice(index, 1); renderCart(); }
 function clearCart() { cart = []; renderCart(); }
 
+// ─── تجميع السلة حسب طريقة الدفع (نقدي / آجل) ────────────────────────────────
+function getCartSplit() {
+  const cashSubtotal   = cart.filter(it => (it.payType || 'cash') !== 'credit').reduce((a, it) => a + it.total, 0);
+  const creditSubtotal = cart.filter(it => (it.payType || 'cash') === 'credit').reduce((a, it) => a + it.total, 0);
+  return { cashSubtotal, creditSubtotal };
+}
+
 function updateTotals() {
   const subtotal = cart.reduce((a, it) => a + it.total, 0);
   const disc     = parseFloat(document.getElementById('pos-discount')?.value || 0);
@@ -609,6 +823,21 @@ function updateTotals() {
   setText('pos-subtotal', fmt(subtotal) + ' ' + cur);
   setText('pos-total',    fmt(total)    + ' ' + cur);
   setText('pos-profit',   '+' + fmt(profit) + ' ' + cur);
+
+  // ─── عرض تفصيل نقدي/آجل عندما تكون الفاتورة مقسّمة بين الاثنين ────────────
+  const { cashSubtotal, creditSubtotal } = getCartSplit();
+  const cashPart   = cashSubtotal   * (1 - disc / 100);
+  const creditPart = creditSubtotal * (1 - disc / 100);
+  const splitRow = document.getElementById('pos-split-row');
+  if (splitRow) {
+    if (cashSubtotal > 0 && creditSubtotal > 0) {
+      splitRow.style.display = 'flex';
+      setText('pos-cash-part',   fmt(cashPart)   + ' ' + cur);
+      setText('pos-credit-part', fmt(creditPart) + ' ' + cur);
+    } else {
+      splitRow.style.display = 'none';
+    }
+  }
 }
 
 function setupPaymentButtons() {
@@ -630,19 +859,29 @@ function checkout() {
   const custId     = document.getElementById('pos-customer')?.value || '';
   const cust       = custId ? DB.Customers.byId(custId) : null;
 
-  // ⚠️ تحذير: بيع آجل لزبون عليه دين
-  if (selectedPayment === 'credit') {
+  // ─── تقسيم الفاتورة حسب طريقة دفع كل منتج (نقدي أو آجل) ───────────────────
+  const { cashSubtotal, creditSubtotal } = getCartSplit();
+  const cashAmount   = cashSubtotal   * (1 - disc / 100);
+  const creditAmount = creditSubtotal * (1 - disc / 100);
+
+  let paymentMethod;
+  if (creditAmount <= 0)      paymentMethod = selectedPayment === 'card' ? 'card' : 'cash';
+  else if (cashAmount <= 0)   paymentMethod = 'credit';
+  else                        paymentMethod = 'mixed';
+
+  // ⚠️ البيع الآجل (كلياً أو جزئياً) يتطلب تحديد زبون
+  if (creditAmount > 0) {
     if (!custId) {
-      toast('⚠️ البيع الآجل يتطلب تحديد زبون / Credit sale requires a customer', 'error');
+      toast('⚠️ وجود منتجات آجلة يتطلب تحديد زبون / Credit items require a customer', 'error');
       return;
     }
     if (cust && (cust.debt || 0) > 0) {
       const S = DB.Settings.get(); const cur = S.currency || 'دج';
-      const newDebt = (cust.debt || 0) + total;
+      const newDebt = (cust.debt || 0) + creditAmount;
       if (!confirm(
         `⚠️ تحذير — ${cust.name} لديه دين غير مسدَّد!\n\n` +
         `الدين الحالي: ${fmt(cust.debt)} ${cur}\n` +
-        `قيمة هذه الفاتورة: ${fmt(total)} ${cur}\n` +
+        `الجزء الآجل من هذه الفاتورة: ${fmt(creditAmount)} ${cur}\n` +
         `الدين الجديد بعد البيع: ${fmt(newDebt)} ${cur}\n\n` +
         `هل تريد المتابعة وإضافة دين جديد؟`
       )) return;
@@ -652,7 +891,7 @@ function checkout() {
   const sale = DB.Sales.create({
     customerId: custId || null, customerName: cust ? cust.name : 'زبون عام',
     items: [...cart], subtotal, discount: disc, total, profit,
-    paymentMethod: selectedPayment
+    paymentMethod, cashAmount, creditAmount
   });
 
   clearCart();
@@ -671,10 +910,11 @@ function showQuickReceipt(sale) {
     <div class="receipt-body">
       <div class="receipt-success-icon"><i class="fas fa-circle-check"></i></div>
       <div class="receipt-inv-no">${sale.invoiceNo}</div>
+      <div class="receipt-barcode">${typeof DakaniBarcode !== 'undefined' ? DakaniBarcode.toSVG(sale.invoiceNo, { unit: 1.6, height: 34, showText: false }) : ''}</div>
       <div class="receipt-customer"><i class="fas fa-user"></i> ${sale.customerName}</div>
       <div class="receipt-items">
         ${sale.items.map(it => `<div class="receipt-item">
-          <span>${it.nameAr} × ${it.qty}</span>
+          <span>${it.nameAr} × ${it.qty} ${(it.payType||'cash')==='credit' ? '<span class="badge pay-credit" style="font-size:10px;margin-right:6px">آجل</span>' : ''}</span>
           <span>${fmt(it.total)} ${cur}</span>
         </div>`).join('')}
       </div>
@@ -683,10 +923,14 @@ function showQuickReceipt(sale) {
         <span>الإجمالي</span>
         <span>${fmt(sale.total)} ${cur}</span>
       </div>
+      ${sale.paymentMethod === 'mixed' ? `<div class="receipt-split">
+          <div><i class="fas fa-money-bill"></i> نقدي: <strong>${fmt(sale.cashAmount || 0)} ${cur}</strong></div>
+          <div><i class="fas fa-clock"></i> آجل: <strong>${fmt(sale.creditAmount || 0)} ${cur}</strong></div>
+        </div>` : ''}
       <div class="receipt-profit">ربح هذه الفاتورة: +${fmt(sale.profit)} ${cur}</div>
       <div class="receipt-method"><span class="badge pay-${sale.paymentMethod}">${payLabel(sale.paymentMethod)}</span></div>
       ${(() => {
-        if (sale.paymentMethod === 'credit' && sale.customerId) {
+        if ((sale.paymentMethod === 'credit' || sale.paymentMethod === 'mixed') && sale.customerId) {
           const c = DB.Customers.byId(sale.customerId);
           if (c && (c.debt||0) > 0) {
             const S = DB.Settings.get(); const cur = S.currency || 'دج';
@@ -972,14 +1216,87 @@ function viewSupplierDetail(id) {
   openModal('modal-supplier-detail');
 }
 
+// ─── تصنيف الزبائن (Customer Classification) ───────────────────────────────
+// التصنيف يُحسب تلقائياً من إجمالي مشتريات الزبون (totalBought) — لا يُخزَّن
+// في قاعدة البيانات، بل يُحسب عند العرض فقط، حتى يبقى متوافقاً دائماً مع
+// آخر تعديل للحدود من صفحة الإعدادات دون الحاجة لأي ترحيل بيانات.
+const CUSTOMER_TIERS = {
+  vip:     { key: 'vip',     labelAr: 'ماسي / VIP', icon: 'fa-gem',    color: '#8b5cf6' },
+  gold:    { key: 'gold',    labelAr: 'ذهبي',        icon: 'fa-award',  color: 'var(--gold)' },
+  silver:  { key: 'silver',  labelAr: 'فضي',         icon: 'fa-medal',  color: 'var(--blue)' },
+  regular: { key: 'regular', labelAr: 'عادي',        icon: 'fa-user',   color: 'var(--text3)' },
+  new:     { key: 'new',     labelAr: 'جديد',        icon: 'fa-star',   color: 'var(--accent)' }
+};
+
+function classifyCustomer(c) {
+  const S        = DB.Settings.get();
+  const vipMin    = S.custTierVip    || 50000;
+  const goldMin   = S.custTierGold   || 20000;
+  const silverMin = S.custTierSilver || 5000;
+  const bought    = (c && c.totalBought)    || 0;
+  const visits    = (c && c.purchaseCount)  || 0;
+  const order     = ['new', 'regular', 'silver', 'gold', 'vip'];
+
+  // 1) تصنيف حسب إجمالي المبلغ المُنفق
+  let amountTier;
+  if (bought <= 0)              amountTier = 'new';
+  else if (bought >= vipMin)    amountTier = 'vip';
+  else if (bought >= goldMin)   amountTier = 'gold';
+  else if (bought >= silverMin) amountTier = 'silver';
+  else                          amountTier = 'regular';
+
+  // 2) ترقية تلقائية حسب "الولاء" (عدد مرات الشراء) — حتى لو كان المبلغ لا يزال صغيراً:
+  //    5 عمليات شراء فأكثر → فضي على الأقل، 15 → ذهبي على الأقل، 30 → ماسي على الأقل
+  let loyaltyTier = 'new';
+  if (visits >= 30)      loyaltyTier = 'vip';
+  else if (visits >= 15) loyaltyTier = 'gold';
+  else if (visits >= 5)  loyaltyTier = 'silver';
+  else if (visits >= 1)  loyaltyTier = 'regular';
+
+  // التصنيف النهائي = الأعلى بين تصنيف المبلغ وتصنيف الولاء (ترقية فقط، لا تراجع)
+  const finalKey = order.indexOf(loyaltyTier) > order.indexOf(amountTier) ? loyaltyTier : amountTier;
+  return CUSTOMER_TIERS[finalKey];
+}
+
+function customerTierBadge(c) {
+  const t = classifyCustomer(c);
+  return `<span class="cust-tier-badge" style="background:${t.color}20;color:${t.color}" title="${t.labelAr}">
+    <i class="fas ${t.icon}"></i> ${t.labelAr}
+  </span>`;
+}
+
+// يعرض تصنيف الزبون داخل نافذة إضافة/تعديل زبون
+function renderCustomerTierInfo(c) {
+  const box = document.getElementById('cust-tier-info-box');
+  if (!box) return;
+  if (!c) {
+    const t = CUSTOMER_TIERS.new;
+    box.innerHTML = `
+      <div class="cust-tier-info-row">
+        <span class="cust-tier-badge" style="background:${t.color}20;color:${t.color}"><i class="fas ${t.icon}"></i> ${t.labelAr}</span>
+        <span class="cust-tier-info-note">زبون جديد — يُصنَّف ويُرقّى تلقائياً حسب مشترياته وعدد مرات شرائه</span>
+      </div>`;
+    return;
+  }
+  const S = DB.Settings.get(); const cur = S.currency || 'دج';
+  const visits = c.purchaseCount || 0;
+  box.innerHTML = `
+    <div class="cust-tier-info-row">
+      ${customerTierBadge(c)}
+      <span class="cust-tier-info-note">${fmt(c.totalBought||0)} ${cur} إجمالي المشتريات • ${visits} عملية شراء</span>
+    </div>`;
+}
+
 // ─── Customers ────────────────────────────────────────────────────────────────
 function renderCustomers() {
   const q          = (document.getElementById('cust-search')?.value || '').toLowerCase();
   const debtFilter = document.getElementById('cust-debt-filter')?.value || '';
+  const tierFilter = document.getElementById('cust-tier-filter')?.value || '';
   let list         = DB.Customers.all();
   if (q)          list = list.filter(c => c.name.toLowerCase().includes(q) || (c.phone||'').includes(q));
   if (debtFilter === 'debt')  list = list.filter(c => (c.debt||0) > 0);
   if (debtFilter === 'clear') list = list.filter(c => (c.debt||0) <= 0);
+  if (tierFilter)             list = list.filter(c => classifyCustomer(c).key === tierFilter);
   list = list.slice().sort((a,b) => (b.debt||0) - (a.debt||0));
   const S = DB.Settings.get(); const cur = S.currency || 'دج';
   const tbody = document.getElementById('customers-body');
@@ -994,6 +1311,7 @@ function renderCustomers() {
         ${c.address ? `<div style="font-size:11px;color:var(--text3)">${c.address}</div>` : ''}
       </td>
       <td>${c.phone ? `<a href="tel:${c.phone}" style="color:var(--accent)">${c.phone}</a>` : '—'}</td>
+      <td>${customerTierBadge(c)}</td>
       <td class="${hasDebt ? 'debt-cell-danger' : 'debt-cell-clear'}">
         ${hasDebt
           ? `<div class="debt-amount-badge">${fmt(c.debt)} ${cur}</div>`
@@ -1009,7 +1327,7 @@ function renderCustomers() {
       </td>
     </tr>`;
   }).join('')
-  : '<tr><td colspan="7" class="empty-td">لا يوجد زبائن — أضف أول زبون</td></tr>';
+  : '<tr><td colspan="8" class="empty-td">لا يوجد زبائن — أضف أول زبون</td></tr>';
 
   // KPI الديون
   const kpiGrid    = document.getElementById('cust-kpi-grid');
@@ -1041,6 +1359,19 @@ function renderCustomers() {
     bar.innerHTML = `<span><i class="fas fa-users"></i> ${list.length} زبون</span>
       <span class="debt-cell-danger"><i class="fas fa-sack-dollar"></i> ديون: <strong>${fmt(shownDebt)} ${cur}</strong></span>`;
   } else if (bar) bar.innerHTML = '';
+
+  // شريط توزيع تصنيف الزبائن — قابل للنقر للتصفية السريعة
+  const tierBar = document.getElementById('cust-tier-stats');
+  if (tierBar) {
+    const counts = { vip: 0, gold: 0, silver: 0, regular: 0, new: 0 };
+    allC.forEach(c => { counts[classifyCustomer(c).key]++; });
+    tierBar.innerHTML = Object.values(CUSTOMER_TIERS).map(t => `
+      <button type="button" class="cust-tier-chip ${tierFilter === t.key ? 'active' : ''}"
+        style="--tier-color:${t.color}"
+        onclick="document.getElementById('cust-tier-filter').value='${tierFilter === t.key ? '' : t.key}';renderCustomers()">
+        <i class="fas ${t.icon}"></i> ${t.labelAr} <strong>${counts[t.key]}</strong>
+      </button>`).join('');
+  }
 }
 
 
@@ -1054,6 +1385,7 @@ function editCustomer(id) {
   document.getElementById('cust-phone').value   = c.phone || '';
   document.getElementById('cust-address').value = c.address || '';
   document.getElementById('cust-notes').value   = c.notes || '';
+  renderCustomerTierInfo(c);
   openModal('modal-customer');
 }
 
@@ -1182,7 +1514,7 @@ function viewCustomerStatement(customerId) {
   ].sort((a, b) => new Date(b.date) - new Date(a.date));
 
   document.getElementById('stmt-title').innerHTML =
-    `<i class="fas fa-file-invoice-dollar"></i> كشف حساب: ${c.name}`;
+    `<i class="fas fa-file-invoice-dollar"></i> كشف حساب: ${c.name} ${customerTierBadge(c)}`;
 
   const totalSales   = sales.reduce((a, s) => a + s.total, 0);
   const totalPaid    = payments.reduce((a, p) => a + p.amount, 0);
@@ -1212,11 +1544,13 @@ function viewCustomerStatement(customerId) {
         <tbody>${timeline.map(t => {
           if (t.type === 'sale') {
             const s = t.data;
+            const isDebtRelated = s.paymentMethod === 'credit' || s.paymentMethod === 'mixed';
+            const debtPart = s.paymentMethod === 'mixed' ? (s.creditAmount || 0) : s.total;
             return `<tr>
               <td>${fmtDate(s.date)}</td>
               <td><span class="badge pay-${s.paymentMethod}">${payLabel(s.paymentMethod)}</span></td>
-              <td>${s.invoiceNo} — ${s.items.length} منتج</td>
-              <td class="${s.paymentMethod==='credit' ? 'debt-cell-danger' : ''}"><strong>${fmt(s.total)} ${cur}</strong></td>
+              <td>${s.invoiceNo} — ${s.items.length} منتج${s.paymentMethod === 'mixed' ? ` <span style="color:var(--text3);font-size:11px">(آجل: ${fmt(debtPart)} ${cur})</span>` : ''}</td>
+              <td class="${isDebtRelated ? 'debt-cell-danger' : ''}"><strong>${fmt(s.total)} ${cur}</strong></td>
               <td>—</td>
             </tr>`;
           } else {
@@ -1290,9 +1624,13 @@ function renderInvoices() {
   const from   = document.getElementById('inv-date-from')?.value;
   const to     = document.getElementById('inv-date-to')?.value;
   const method = document.getElementById('inv-method-filter')?.value || '';
+  const barcodeQ = (document.getElementById('inv-barcode-search')?.value || '').trim().toUpperCase();
+  const customerQ = (document.getElementById('inv-customer-search')?.value || '').trim().toLowerCase();
   let list     = DB.Sales.all().slice().reverse();
   if (from && to) list = list.filter(s => s.date >= from && s.date <= to + 'T23:59:59');
   if (method) list = list.filter(s => s.paymentMethod === method);
+  if (barcodeQ) list = list.filter(s => s.invoiceNo.toUpperCase().includes(barcodeQ));
+  if (customerQ) list = list.filter(s => (s.customerName || '').toLowerCase().includes(customerQ));
   const S = DB.Settings.get(); const cur = S.currency || 'دج';
   const tbody = document.getElementById('invoices-body');
   if (!tbody) return;
@@ -1321,6 +1659,22 @@ function renderInvoices() {
       <span><i class="fas fa-sack-dollar"></i> الإجمالي: <strong>${fmt(totalRev)} ${cur}</strong></span>
       <span class="profit-cell"><i class="fas fa-trending-up"></i> الأرباح: <strong>+${fmt(totalProfit)} ${cur}</strong></span>`;
   } else if (bar) { bar.innerHTML = ''; }
+}
+
+// ─── مسح باركود فاتورة من صفحة الفواتير: فتحها فوراً عند مطابقة تامة ─────────
+function invBarcodeKeydown(e) {
+  if (e.key !== 'Enter') return;
+  const input = document.getElementById('inv-barcode-search');
+  const val = (input?.value || '').trim().toUpperCase();
+  if (!val) return;
+  const match = DB.Sales.all().find(s => s.invoiceNo.toUpperCase() === val);
+  if (match) {
+    viewInvoice(match.id);
+    if (input) input.value = '';
+    renderInvoices();
+  } else {
+    toast(`❌ لم يتم العثور على فاتورة بهذا الرقم: ${val}`, 'error');
+  }
 }
 
 // ─── current invoice id for delete-from-preview ───────────────────────────────
@@ -1354,7 +1708,7 @@ function buildInvoiceHTML(s, S, cur) {
   const itemsRows = s.items.map((it, i) => `
     <tr>
       <td class="inv-td-num">${i + 1}</td>
-      <td class="inv-td-name">${it.nameAr}${it.nameEn ? `<span class="inv-en">${it.nameEn}</span>` : ''}</td>
+      <td class="inv-td-name">${it.nameAr}${it.nameEn ? `<span class="inv-en">${it.nameEn}</span>` : ''}${(it.payType||'cash')==='credit' ? ' <span class="inv-item-credit-tag">آجل</span>' : ''}</td>
       <td class="inv-td-r">${fmt(it.price)}</td>
       <td class="inv-td-r">${it.qty}</td>
       <td class="inv-td-r inv-td-total">${fmt(it.total)}</td>
@@ -1406,6 +1760,15 @@ function buildInvoiceHTML(s, S, cur) {
         <span>خصم (${s.discount}%)</span>
         <span>− ${fmt(s.subtotal * s.discount / 100)} ${cur}</span>
       </div>` : ''}
+      ${s.paymentMethod === 'mixed' ? `
+      <div class="inv-tot-row">
+        <span><i class="fas fa-money-bill"></i> نقدي</span>
+        <span>${fmt(s.cashAmount || 0)} ${cur}</span>
+      </div>
+      <div class="inv-tot-row">
+        <span><i class="fas fa-clock"></i> آجل (دين)</span>
+        <span>${fmt(s.creditAmount || 0)} ${cur}</span>
+      </div>` : ''}
       <div class="inv-tot-row grand-total">
         <span>الإجمالي النهائي</span>
         <span>${fmt(s.total)} ${cur}</span>
@@ -1413,7 +1776,10 @@ function buildInvoiceHTML(s, S, cur) {
     </div>
 
     <div class="inv-paper-footer">
-      <div class="inv-barcode-line">${s.invoiceNo}</div>
+      <div class="inv-barcode-wrap">
+        ${typeof DakaniBarcode !== 'undefined' ? DakaniBarcode.toSVG(s.invoiceNo, { unit: 2, height: 42, showText: false }) : ''}
+        <div class="inv-barcode-line">${s.invoiceNo}</div>
+      </div>
       <p class="inv-footer-thanks">${S.thankYouMessage || 'شكراً لتعاملكم معنا 🙏'}</p>
       <p class="inv-footer-credit">دكاني Dukani المصمم لتنظيم اعمال المحلات</p>
     </div>
@@ -1486,7 +1852,9 @@ function printInvoice() {
     .inv-tot-row.discount { color:#ef4444; }
     .inv-tot-row.grand-total { font-size:18px; font-weight:900; color:#059669 !important; border-top:2px dashed #e5e7eb; padding-top:12px; margin-top:4px; }
     .inv-paper-footer { text-align:center; padding-top:16px; border-top:1px dashed #e5e7eb; }
-    .inv-barcode-line { font-family:monospace; font-size:11px; color:#9ca3af; letter-spacing:3px; margin-bottom:8px; }
+    .inv-barcode-wrap { display:flex; flex-direction:column; align-items:center; margin-bottom:10px; }
+    .inv-barcode-wrap svg { max-width:220px; }
+    .inv-barcode-line { font-family:monospace; font-size:11px; color:#9ca3af; letter-spacing:3px; margin-top:2px; }
     .inv-footer-thanks { font-size:13px; color:#6b7280; margin:0; }
 
     @media (max-width: 480px) {
@@ -1535,6 +1903,29 @@ function initReports() {
   generateReport();
 }
 
+// حساب الفترة السابقة (نفس عدد الأيام مباشرة قبل الفترة الحالية) — لمقارنة النمو
+function _reportPrevPeriod(from, to) {
+  const fromD = new Date(from + 'T00:00:00');
+  const toD   = new Date(to   + 'T00:00:00');
+  const dayMs = 86400000;
+  const spanDays = Math.max(1, Math.round((toD - fromD) / dayMs) + 1);
+  const prevTo   = new Date(fromD.getTime() - dayMs);
+  const prevFrom = new Date(prevTo.getTime() - (spanDays - 1) * dayMs);
+  const toStr = d => d.toISOString().slice(0, 10);
+  return { prevFrom: toStr(prevFrom), prevTo: toStr(prevTo) };
+}
+
+// شارة النمو مقارنة بالفترة السابقة
+function _deltaBadge(curr, prev) {
+  if (!prev && !curr) return '<span class="kpi-delta flat"><i class="fas fa-minus"></i> 0%</span>';
+  if (!prev) return '<span class="kpi-delta up"><i class="fas fa-arrow-up"></i> جديد</span>';
+  const pct = ((curr - prev) / prev) * 100;
+  if (Math.abs(pct) < 0.05) return '<span class="kpi-delta flat"><i class="fas fa-minus"></i> 0%</span>';
+  const cls = pct > 0 ? 'up' : 'down';
+  const icon = pct > 0 ? 'arrow-up' : 'arrow-down';
+  return `<span class="kpi-delta ${cls}"><i class="fas fa-${icon}"></i> ${Math.abs(pct).toFixed(1)}%</span>`;
+}
+
 function generateReport() {
   const from  = document.getElementById('rep-from')?.value;
   const to    = document.getElementById('rep-to')?.value;
@@ -1548,13 +1939,21 @@ function generateReport() {
   const invoiceCount = sales.length;
   const avgBasket   = invoiceCount ? totalRev / invoiceCount : 0;
 
+  // ─── مقارنة مع الفترة السابقة (نسبة النمو) ─────────────────────────────
+  const { prevFrom, prevTo } = _reportPrevPeriod(from, to);
+  const prevSales   = DB.Sales.between(prevFrom, prevTo);
+  const prevRev     = prevSales.reduce((a, s) => a + s.total, 0);
+  const prevProfit  = prevSales.reduce((a, s) => a + s.profit, 0);
+  const prevCount   = prevSales.length;
+  const prevAvg     = prevCount ? prevRev / prevCount : 0;
+
   const kpiEl = document.getElementById('report-kpis');
   if (kpiEl) kpiEl.innerHTML = [
-    { icon:'sack-dollar', val: fmt(totalRev)+' '+cur,    label:'إجمالي المبيعات / Total Sales', cls:'kpi-sales' },
-    { icon:'trending-up', val: fmt(totalProfit)+' '+cur, label:'إجمالي الأرباح / Total Profit',  cls:'kpi-profit' },
-    { icon:'receipt',     val: invoiceCount,              label:'عدد الفواتير / Invoices',        cls:'kpi-invoices' },
-    { icon:'chart-simple',val: fmt(avgBasket)+' '+cur,   label:'متوسط الفاتورة / Avg Basket',    cls:'kpi-customers' }
-  ].map(k => `<div class="kpi-card ${k.cls}"><div class="kpi-icon"><i class="fas fa-${k.icon}"></i></div><div class="kpi-info"><div class="kpi-value">${k.val}</div><div class="kpi-label">${k.label}</div></div></div>`).join('');
+    { icon:'sack-dollar', val: fmt(totalRev)+' '+cur,    label:'إجمالي المبيعات / Total Sales', cls:'kpi-sales',     delta:_deltaBadge(totalRev, prevRev) },
+    { icon:'trending-up', val: fmt(totalProfit)+' '+cur, label:'إجمالي الأرباح / Total Profit',  cls:'kpi-profit',    delta:_deltaBadge(totalProfit, prevProfit) },
+    { icon:'receipt',     val: invoiceCount,              label:'عدد الفواتير / Invoices',        cls:'kpi-invoices',  delta:_deltaBadge(invoiceCount, prevCount) },
+    { icon:'chart-simple',val: fmt(avgBasket)+' '+cur,   label:'متوسط الفاتورة / Avg Basket',    cls:'kpi-customers', delta:_deltaBadge(avgBasket, prevAvg) }
+  ].map(k => `<div class="kpi-card ${k.cls}"><div class="kpi-icon"><i class="fas fa-${k.icon}"></i></div><div class="kpi-info"><div class="kpi-value">${k.val}</div><div class="kpi-label">${k.label}</div>${k.delta}</div></div>`).join('');
 
   // Chart by day
   const dayMap = {};
@@ -1599,6 +1998,102 @@ function generateReport() {
       <span class="top-rev">${fmt(p.revenue)} ${cur}</span>
     </div>`).join('') : '<div class="empty-state">لا توجد بيانات / No data</div>';
 
+  // ─── طرق الدفع والديون ──────────────────────────────────────────────────
+  const payMap = {};
+  sales.forEach(s => {
+    const m = s.paymentMethod || 'cash';
+    if (!payMap[m]) payMap[m] = { count: 0, total: 0 };
+    payMap[m].count++; payMap[m].total += s.total;
+  });
+  const debtCollected = (DB.DebtPayments.all() || [])
+    .filter(p => p.date >= from && p.date <= to + 'T23:59:59')
+    .reduce((a, p) => a + p.amount, 0);
+  const creditGiven = sales.reduce((a, s) => a + (s.creditAmount || 0), 0);
+
+  const pmEl = document.getElementById('report-payment-methods');
+  if (pmEl) {
+    const rows = Object.entries(payMap).sort((a, b) => b[1].total - a[1].total).map(([method, d]) => {
+      const pct = totalRev ? (d.total / totalRev * 100) : 0;
+      return `<div class="breakdown-row">
+        <div class="breakdown-top">
+          <span class="breakdown-label">${payLabel(method)} <span class="breakdown-count">(${d.count})</span></span>
+          <span class="breakdown-value">${fmt(d.total)} ${cur}</span>
+        </div>
+        <div class="breakdown-bar"><div class="breakdown-bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
+      </div>`;
+    }).join('');
+    pmEl.innerHTML = (rows || '<div class="empty-state">لا توجد بيانات / No data</div>') +
+      `<div class="report-mini-stat"><span><i class="fas fa-hand-holding-dollar"></i> ديون جديدة (آجل)</span><strong class="debt-cell">${fmt(creditGiven)} ${cur}</strong></div>
+       <div class="report-mini-stat"><span><i class="fas fa-money-bill-wave"></i> ديون تم تحصيلها</span><strong class="profit-cell">${fmt(debtCollected)} ${cur}</strong></div>`;
+  }
+
+  // ─── المبيعات حسب الفئة ─────────────────────────────────────────────────
+  const catMap = {};
+  sales.forEach(s => s.items.forEach(it => {
+    const prod = DB.Products.byId(it.productId);
+    const catName = (prod && prod.category) || 'غير مصنف / Uncategorized';
+    if (!catMap[catName]) catMap[catName] = { revenue: 0, qty: 0 };
+    catMap[catName].revenue += it.total;
+    catMap[catName].qty += it.qty;
+  }));
+  const catEl = document.getElementById('report-categories');
+  if (catEl) {
+    const catRows = Object.entries(catMap).sort((a, b) => b[1].revenue - a[1].revenue).map(([name, d]) => {
+      const pct = totalRev ? (d.revenue / totalRev * 100) : 0;
+      return `<div class="breakdown-row">
+        <div class="breakdown-top">
+          <span class="breakdown-label">${name} <span class="breakdown-count">(${fmt(d.qty)})</span></span>
+          <span class="breakdown-value">${fmt(d.revenue)} ${cur}</span>
+        </div>
+        <div class="breakdown-bar"><div class="breakdown-bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
+      </div>`;
+    }).join('');
+    catEl.innerHTML = catRows || '<div class="empty-state">لا توجد بيانات / No data</div>';
+  }
+
+  // ─── أفضل الزبائن خلال الفترة ───────────────────────────────────────────
+  const custMap = {};
+  sales.forEach(s => {
+    const key = s.customerId || ('__guest__' + s.customerName);
+    if (!custMap[key]) custMap[key] = { name: s.customerName || 'زبون عام', count: 0, total: 0 };
+    custMap[key].count++; custMap[key].total += s.total;
+  });
+  const topCustomers = Object.values(custMap).sort((a, b) => b.total - a.total).slice(0, 8);
+  const tcEl = document.getElementById('report-top-customers');
+  if (tcEl) tcEl.innerHTML = topCustomers.length ? topCustomers.map((c, i) =>
+    `<div class="top-prod-row">
+      <span class="top-rank">${i+1}</span>
+      <span class="top-name">${c.name}</span>
+      <span class="top-qty">${c.count}</span>
+      <span class="top-rev">${fmt(c.total)} ${cur}</span>
+    </div>`).join('') : '<div class="empty-state">لا توجد بيانات / No data</div>';
+
+  // ─── المرتجعات والمشتريات خلال الفترة ───────────────────────────────────
+  const returnsInPeriod = (DB.Returns.all() || [])
+    .filter(r => r.date >= from && r.date <= to + 'T23:59:59');
+  const totalReturns  = returnsInPeriod.reduce((a, r) => a + r.totalRefund, 0);
+  const returnsCount  = returnsInPeriod.length;
+
+  // تقدير تأثير المرتجعات على الربح باستخدام سعر التكلفة الحالي للمنتج
+  // (تقديري لأن سعر التكلفة قد يكون تغيّر منذ عملية البيع الأصلية)
+  let estLostProfit = 0;
+  returnsInPeriod.forEach(r => (r.items || []).forEach(it => {
+    const p = DB.Products.byId(it.productId);
+    const buy = p ? (p.buyPrice || 0) : 0;
+    estLostProfit += (it.price - buy) * it.qty;
+  }));
+
+  const purchasesInPeriod = DB.Purchases.between(from, to);
+  const totalPurchases = purchasesInPeriod.reduce((a, p) => a + (p.qty * p.unitPrice), 0);
+  const netProfitEst = totalProfit - estLostProfit;
+
+  const rpEl = document.getElementById('report-returns-purchases');
+  if (rpEl) rpEl.innerHTML = `
+    <div class="report-mini-stat"><span><i class="fas fa-rotate-left"></i> عدد المرتجعات</span><strong>${returnsCount}</strong></div>
+    <div class="report-mini-stat"><span><i class="fas fa-sack-xmark"></i> إجمالي المرتجعات</span><strong class="debt-cell">- ${fmt(totalReturns)} ${cur}</strong></div>
+    <div class="report-mini-stat"><span><i class="fas fa-truck-ramp-box"></i> المشتريات (تكلفة البضاعة)</span><strong>${fmt(totalPurchases)} ${cur}</strong></div>
+    <div class="report-mini-stat"><span><i class="fas fa-scale-balanced"></i> صافي الربح بعد المرتجعات (تقديري)</span><strong class="profit-cell">${fmt(netProfitEst)} ${cur}</strong></div>`;
+
   // Details table
   const tbody = document.getElementById('report-sales-body');
   if (tbody) tbody.innerHTML = sales.slice().reverse().map(s=>
@@ -1615,6 +2110,427 @@ function generateReport() {
 
 function printReport() { window.print(); }
 
+// ─── Export Report: Excel (احترافي) ─────────────────────────────────────────────
+async function exportReportExcel() {
+  if (typeof ExcelJS === 'undefined') {
+    alert('تعذر تحميل مكتبة Excel، تأكد من الاتصال بالإنترنت عند أول استخدام ثم أعد المحاولة');
+    return;
+  }
+  const from = document.getElementById('rep-from')?.value;
+  const to   = document.getElementById('rep-to')?.value;
+  if (!from || !to) { alert('يرجى اختيار الفترة وإنشاء التقرير أولاً'); return; }
+
+  const btn = document.querySelector('button[onclick="exportReportExcel()"]');
+  const btnHtml = btn?.innerHTML;
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري التصدير...'; }
+
+  try {
+    const sales = DB.Sales.between(from, to);
+    const S = DB.Settings.get(); const cur = S.currency || 'دج';
+
+    const totalRev     = sales.reduce((a, s) => a + s.total, 0);
+    const totalProfit  = sales.reduce((a, s) => a + s.profit, 0);
+    const invoiceCount = sales.length;
+    const avgBasket    = invoiceCount ? totalRev / invoiceCount : 0;
+
+    // مقارنة مع الفترة السابقة
+    const { prevFrom, prevTo } = _reportPrevPeriod(from, to);
+    const prevSales    = DB.Sales.between(prevFrom, prevTo);
+    const prevRev      = prevSales.reduce((a, s) => a + s.total, 0);
+    const prevProfit   = prevSales.reduce((a, s) => a + s.profit, 0);
+    const growthRev    = prevRev    ? ((totalRev - prevRev) / prevRev * 100)       : (totalRev ? 100 : 0);
+    const growthProfit = prevProfit ? ((totalProfit - prevProfit) / prevProfit * 100) : (totalProfit ? 100 : 0);
+
+    // طرق الدفع والديون
+    const payMap = {};
+    sales.forEach(s => {
+      const m = s.paymentMethod || 'cash';
+      if (!payMap[m]) payMap[m] = { count: 0, total: 0 };
+      payMap[m].count++; payMap[m].total += s.total;
+    });
+    const debtCollected = (DB.DebtPayments.all() || [])
+      .filter(p => p.date >= from && p.date <= to + 'T23:59:59')
+      .reduce((a, p) => a + p.amount, 0);
+    const creditGiven = sales.reduce((a, s) => a + (s.creditAmount || 0), 0);
+
+    // المرتجعات والمشتريات
+    const returnsInPeriod = (DB.Returns.all() || [])
+      .filter(r => r.date >= from && r.date <= to + 'T23:59:59');
+    const totalReturns = returnsInPeriod.reduce((a, r) => a + r.totalRefund, 0);
+    let estLostProfit = 0;
+    returnsInPeriod.forEach(r => (r.items || []).forEach(it => {
+      const p = DB.Products.byId(it.productId);
+      estLostProfit += (it.price - (p ? (p.buyPrice || 0) : 0)) * it.qty;
+    }));
+    const purchasesInPeriod = DB.Purchases.between(from, to);
+    const totalPurchases = purchasesInPeriod.reduce((a, p) => a + (p.qty * p.unitPrice), 0);
+    const netProfitEst = totalProfit - estLostProfit;
+
+    // ─── ألوان العلامة التجارية لدكاني (مطابقة لواجهة الموقع) ─────────────
+    const BRAND = {
+      dark:   'FF0A0F1E',
+      accent: 'FF10B981',
+      accent2:'FF059669',
+      gold:   'FFF59E0B',
+      white:  'FFFFFFFF',
+      label:  'FF374151',
+      border: 'FFD9DEE5',
+      zebra:  'FFF3F5F8'
+    };
+    const numFmt = '#,##0.00';
+    const thinBorder = {
+      top:    { style: 'thin', color: { argb: BRAND.border } },
+      bottom: { style: 'thin', color: { argb: BRAND.border } },
+      left:   { style: 'thin', color: { argb: BRAND.border } },
+      right:  { style: 'thin', color: { argb: BRAND.border } }
+    };
+    const periodLabel = `الفترة: من ${from} إلى ${to}    —    تاريخ الإصدار: ${fmtDate(new Date().toISOString())}`;
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = S.storeName || 'دكاني';
+    workbook.created = new Date();
+
+    function newSheet(name) {
+      return workbook.addWorksheet(name, { views: [{ rightToLeft: true, showGridLines: false }] });
+    }
+
+    // شريط العنوان العلوي (اسم المتجر + عنوان الورقة + الفترة الزمنية)
+    function titleBanner(ws, colCount, subtitle) {
+      ws.mergeCells(1, 1, 1, colCount);
+      const t = ws.getCell(1, 1);
+      t.value = `${S.storeName || 'دكاني'}  —  ${subtitle}`;
+      t.font = { name: 'Calibri', size: 16, bold: true, color: { argb: BRAND.white } };
+      t.alignment = { horizontal: 'center', vertical: 'middle' };
+      t.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BRAND.dark } };
+      ws.getRow(1).height = 32;
+
+      ws.mergeCells(2, 1, 2, colCount);
+      const p = ws.getCell(2, 1);
+      p.value = periodLabel;
+      p.font = { name: 'Calibri', size: 10, italic: true, color: { argb: BRAND.label } };
+      p.alignment = { horizontal: 'center', vertical: 'middle' };
+      p.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F2F5' } };
+      ws.getRow(2).height = 20;
+      ws.addRow([]);
+    }
+
+    function headerRow(ws, labels) {
+      const r = ws.addRow(labels);
+      r.eachCell(cell => {
+        cell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: BRAND.white } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BRAND.accent } };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.border = thinBorder;
+      });
+      r.height = 24;
+      return r;
+    }
+
+    function dataRow(ws, values, zebra) {
+      const r = ws.addRow(values);
+      r.eachCell(cell => {
+        cell.font = { name: 'Calibri', size: 10.5, color: { argb: BRAND.label } };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.border = thinBorder;
+        if (zebra) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BRAND.zebra } };
+      });
+      r.height = 20;
+      return r;
+    }
+
+    // ═══ ورقة 1: الملخص ═══════════════════════════════════════════════════
+    const wsSummary = newSheet('الملخص');
+    wsSummary.columns = [{ width: 34 }, { width: 20 }];
+    titleBanner(wsSummary, 2, 'تقرير المبيعات / Sales Report');
+
+    const kpis = [
+      [`إجمالي المبيعات / Total Sales (${cur})`, Number(totalRev.toFixed(2)),    numFmt],
+      [`إجمالي الأرباح / Total Profit (${cur})`, Number(totalProfit.toFixed(2)), numFmt],
+      ['عدد الفواتير / Invoices',                 invoiceCount,                   '#,##0'],
+      [`متوسط الفاتورة / Avg Basket (${cur})`,    Number(avgBasket.toFixed(2)),   numFmt],
+      ['نمو المبيعات عن الفترة السابقة / Sales Growth (%)', Number(growthRev.toFixed(1)),    '#,##0.0"%"'],
+      ['نمو الأرباح عن الفترة السابقة / Profit Growth (%)', Number(growthProfit.toFixed(1)), '#,##0.0"%"'],
+      [`ديون جديدة (آجل) / New Credit (${cur})`,   Number(creditGiven.toFixed(2)),  numFmt],
+      [`ديون تم تحصيلها / Debt Collected (${cur})`, Number(debtCollected.toFixed(2)), numFmt],
+      [`إجمالي المرتجعات / Total Returns (${cur})`, Number(totalReturns.toFixed(2)), numFmt],
+      [`المشتريات خلال الفترة / Purchases (${cur})`, Number(totalPurchases.toFixed(2)), numFmt],
+      [`صافي الربح بعد المرتجعات (تقديري) / Net Profit Est. (${cur})`, Number(netProfitEst.toFixed(2)), numFmt]
+    ];
+    kpis.forEach(([label, value, nf], i) => {
+      const r = wsSummary.addRow([label, value]);
+      r.getCell(1).font = { name: 'Calibri', size: 11, bold: true, color: { argb: BRAND.label } };
+      r.getCell(1).alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+      r.getCell(2).font = { name: 'Calibri', size: 12, bold: true, color: { argb: BRAND.accent2 } };
+      r.getCell(2).numFmt = nf;
+      r.getCell(2).alignment = { horizontal: 'center', vertical: 'middle' };
+      r.eachCell(cell => {
+        cell.border = thinBorder;
+        if (i % 2 === 1) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BRAND.zebra } };
+      });
+      r.height = 24;
+    });
+    wsSummary.views = [{ rightToLeft: true, showGridLines: false, state: 'frozen', ySplit: 3 }];
+
+    // ═══ ورقة 2: أفضل المنتجات ═══════════════════════════════════════════
+    const itemMap = {};
+    sales.forEach(s => s.items.forEach(it => {
+      if (!itemMap[it.productId]) itemMap[it.productId] = { nameAr: it.nameAr, qty: 0, revenue: 0, profit: 0 };
+      itemMap[it.productId].qty     += it.qty;
+      itemMap[it.productId].revenue += it.total;
+      itemMap[it.productId].profit  += it.profit;
+    }));
+    const topProds = Object.values(itemMap).sort((a, b) => b.revenue - a.revenue);
+
+    const wsTop = newSheet('أفضل المنتجات');
+    wsTop.columns = [{ width: 32 }, { width: 12 }, { width: 18 }, { width: 18 }];
+    titleBanner(wsTop, 4, 'أفضل المنتجات مبيعاً / Top Products');
+    const topHeader = headerRow(wsTop, ['المنتج / Product', 'الكمية / Qty', `المبيعات / Sales (${cur})`, `الربح / Profit (${cur})`]);
+    topProds.forEach((p, i) => {
+      const r = dataRow(wsTop, [p.nameAr, p.qty, Number(p.revenue.toFixed(2)), Number(p.profit.toFixed(2))], i % 2 === 1);
+      r.getCell(1).alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+      r.getCell(3).numFmt = numFmt;
+      r.getCell(4).numFmt = numFmt;
+      r.getCell(4).font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: BRAND.accent2 } };
+    });
+    if (topProds.length) wsTop.autoFilter = { from: { row: topHeader.number, column: 1 }, to: { row: topHeader.number, column: 4 } };
+    wsTop.views = [{ rightToLeft: true, showGridLines: false, state: 'frozen', ySplit: topHeader.number }];
+
+    // ═══ ورقة: طرق الدفع والديون ═══════════════════════════════════════════
+    const wsPay = newSheet('طرق الدفع والديون');
+    wsPay.columns = [{ width: 26 }, { width: 14 }, { width: 18 }];
+    titleBanner(wsPay, 3, 'طرق الدفع والديون / Payment & Debt');
+    const payHeader = headerRow(wsPay, ['طريقة الدفع / Method', 'عدد الفواتير / Count', `المبلغ / Total (${cur})`]);
+    Object.entries(payMap).sort((a, b) => b[1].total - a[1].total).forEach(([method, d], i) => {
+      const r = dataRow(wsPay, [payLabel(method), d.count, Number(d.total.toFixed(2))], i % 2 === 1);
+      r.getCell(1).alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+      r.getCell(3).numFmt = numFmt;
+      r.getCell(3).font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: BRAND.accent2 } };
+    });
+    const payExtraRow1 = dataRow(wsPay, [`ديون جديدة (آجل) / New Credit`, '', Number(creditGiven.toFixed(2))], true);
+    payExtraRow1.getCell(1).alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+    payExtraRow1.getCell(3).numFmt = numFmt;
+    const payExtraRow2 = dataRow(wsPay, [`ديون تم تحصيلها / Debt Collected`, '', Number(debtCollected.toFixed(2))], false);
+    payExtraRow2.getCell(1).alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+    payExtraRow2.getCell(3).numFmt = numFmt;
+    wsPay.views = [{ rightToLeft: true, showGridLines: false, state: 'frozen', ySplit: payHeader.number }];
+
+    // ═══ ورقة: المبيعات حسب الفئة ══════════════════════════════════════════
+    const catMap = {};
+    sales.forEach(s => s.items.forEach(it => {
+      const prod = DB.Products.byId(it.productId);
+      const catName = (prod && prod.category) || 'غير مصنف / Uncategorized';
+      if (!catMap[catName]) catMap[catName] = { revenue: 0, qty: 0 };
+      catMap[catName].revenue += it.total;
+      catMap[catName].qty += it.qty;
+    }));
+    const wsCat = newSheet('المبيعات حسب الفئة');
+    wsCat.columns = [{ width: 28 }, { width: 14 }, { width: 18 }];
+    titleBanner(wsCat, 3, 'المبيعات حسب الفئة / Sales by Category');
+    const catHeader = headerRow(wsCat, ['الفئة / Category', 'الكمية / Qty', `المبيعات / Sales (${cur})`]);
+    Object.entries(catMap).sort((a, b) => b[1].revenue - a[1].revenue).forEach(([name, d], i) => {
+      const r = dataRow(wsCat, [name, d.qty, Number(d.revenue.toFixed(2))], i % 2 === 1);
+      r.getCell(1).alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+      r.getCell(3).numFmt = numFmt;
+      r.getCell(3).font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: BRAND.accent2 } };
+    });
+    if (Object.keys(catMap).length) wsCat.autoFilter = { from: { row: catHeader.number, column: 1 }, to: { row: catHeader.number, column: 3 } };
+    wsCat.views = [{ rightToLeft: true, showGridLines: false, state: 'frozen', ySplit: catHeader.number }];
+
+    // ═══ ورقة: أفضل الزبائن ═════════════════════════════════════════════════
+    const custMap = {};
+    sales.forEach(s => {
+      const key = s.customerId || ('__guest__' + s.customerName);
+      if (!custMap[key]) custMap[key] = { name: s.customerName || 'زبون عام', count: 0, total: 0 };
+      custMap[key].count++; custMap[key].total += s.total;
+    });
+    const topCustomers = Object.values(custMap).sort((a, b) => b.total - a.total);
+    const wsCust = newSheet('أفضل الزبائن');
+    wsCust.columns = [{ width: 28 }, { width: 16 }, { width: 18 }];
+    titleBanner(wsCust, 3, 'أفضل الزبائن / Top Customers');
+    const custHeader = headerRow(wsCust, ['الزبون / Customer', 'عدد الفواتير / Invoices', `الإجمالي / Total (${cur})`]);
+    topCustomers.forEach((c, i) => {
+      const r = dataRow(wsCust, [c.name, c.count, Number(c.total.toFixed(2))], i % 2 === 1);
+      r.getCell(1).alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+      r.getCell(3).numFmt = numFmt;
+      r.getCell(3).font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: BRAND.accent2 } };
+    });
+    if (topCustomers.length) wsCust.autoFilter = { from: { row: custHeader.number, column: 1 }, to: { row: custHeader.number, column: 3 } };
+    wsCust.views = [{ rightToLeft: true, showGridLines: false, state: 'frozen', ySplit: custHeader.number }];
+
+    // ═══ ورقة 3: تفاصيل المبيعات ═════════════════════════════════════════
+    const wsDetails = newSheet('تفاصيل المبيعات');
+    wsDetails.columns = [{ width: 16 }, { width: 40 }, { width: 10 }, { width: 16 }, { width: 16 }, { width: 20 }, { width: 16 }];
+    titleBanner(wsDetails, 7, 'تفاصيل المبيعات / Sales Details');
+    const detHeader = headerRow(wsDetails, [
+      'التاريخ / Date', 'المنتجات / Products', 'الكمية / Qty',
+      `المبلغ / Total (${cur})`, `الربح / Profit (${cur})`, 'الزبون / Customer', 'الدفع / Payment'
+    ]);
+    sales.slice().reverse().forEach((s, i) => {
+      const r = dataRow(wsDetails, [
+        fmtDate(s.date),
+        s.items.map(it => it.nameAr).join(', '),
+        s.items.reduce((a, it) => a + it.qty, 0),
+        Number(s.total.toFixed(2)),
+        Number(s.profit.toFixed(2)),
+        s.customerName,
+        payLabel(s.paymentMethod)
+      ], i % 2 === 1);
+      r.getCell(2).alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+      r.getCell(4).numFmt = numFmt;
+      r.getCell(5).numFmt = numFmt;
+      r.getCell(5).font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: BRAND.accent2 } };
+    });
+    if (sales.length) wsDetails.autoFilter = { from: { row: detHeader.number, column: 1 }, to: { row: detHeader.number, column: 7 } };
+    wsDetails.views = [{ rightToLeft: true, showGridLines: false, state: 'frozen', ySplit: detHeader.number }];
+
+    // ─── تنزيل الملف ───────────────────────────────────────────────────────
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `تقرير-المبيعات_${from}_${to}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error(err);
+    alert('حدث خطأ أثناء إنشاء ملف Excel، حاول مرة أخرى');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = btnHtml; }
+  }
+}
+
+// ─── Export Report: PDF ────────────────────────────────────────────────────────
+async function exportReportPDF(btn) {
+  if (typeof html2canvas === 'undefined' || typeof window.jspdf === 'undefined') {
+    alert('تعذر تحميل مكتبة PDF، تأكد من الاتصال بالإنترنت عند أول استخدام ثم أعد المحاولة');
+    return;
+  }
+  const from = document.getElementById('rep-from')?.value;
+  const to   = document.getElementById('rep-to')?.value;
+  if (!from || !to) { alert('يرجى اختيار الفترة وإنشاء التقرير أولاً'); return; }
+
+  const originalHTML = btn ? btn.innerHTML : null;
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جارٍ التجهيز...'; }
+
+  const S = DB.Settings.get();
+  const kpiHTML   = document.getElementById('report-kpis')?.innerHTML || '';
+  const topHTML   = document.getElementById('report-top-products')?.innerHTML || '';
+  const payHTML   = document.getElementById('report-payment-methods')?.innerHTML || '';
+  const catHTML   = document.getElementById('report-categories')?.innerHTML || '';
+  const custHTML  = document.getElementById('report-top-customers')?.innerHTML || '';
+  const retHTML   = document.getElementById('report-returns-purchases')?.innerHTML || '';
+  const tableHTML = document.getElementById('report-sales-body')?.innerHTML || '';
+  let chartImg = '';
+  try { if (chartReport) chartImg = chartReport.toBase64Image(); } catch (e) {}
+
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'position:fixed;left:-9999px;top:0;width:794px;background:#ffffff;color:#111827;font-family:Cairo,sans-serif;padding:28px;direction:rtl;z-index:-1;';
+  wrap.innerHTML = `
+    <div style="text-align:center;margin-bottom:18px;border-bottom:2px solid #10b981;padding-bottom:12px">
+      <h1 style="margin:0;font-size:20px;color:#111827">${S.storeName || 'دكاني'}</h1>
+      <p style="margin:6px 0 0;font-size:13px;color:#6b7280">تقرير المبيعات — من ${from} إلى ${to}</p>
+    </div>
+    <div class="pdf-kpis" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px">${kpiHTML}</div>
+    ${chartImg ? `<img src="${chartImg}" style="width:100%;margin-bottom:20px;border:1px solid #e5e7eb;border-radius:8px"/>` : ''}
+    <h3 style="font-size:15px;margin:0 0 8px;color:#111827">أفضل المنتجات / Top Products</h3>
+    <div class="pdf-top" style="margin-bottom:20px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">${topHTML}</div>
+    <div style="display:flex;gap:14px;margin-bottom:20px">
+      <div style="flex:1">
+        <h3 style="font-size:15px;margin:0 0 8px;color:#111827">طرق الدفع والديون / Payment &amp; Debt</h3>
+        <div class="pdf-breakdown" style="border:1px solid #e5e7eb;border-radius:8px;padding:6px 12px">${payHTML}</div>
+      </div>
+      <div style="flex:1">
+        <h3 style="font-size:15px;margin:0 0 8px;color:#111827">حسب الفئة / By Category</h3>
+        <div class="pdf-breakdown" style="border:1px solid #e5e7eb;border-radius:8px;padding:6px 12px">${catHTML}</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:14px;margin-bottom:20px">
+      <div style="flex:1">
+        <h3 style="font-size:15px;margin:0 0 8px;color:#111827">أفضل الزبائن / Top Customers</h3>
+        <div class="pdf-top" style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">${custHTML}</div>
+      </div>
+      <div style="flex:1">
+        <h3 style="font-size:15px;margin:0 0 8px;color:#111827">المرتجعات والمشتريات / Returns &amp; Purchases</h3>
+        <div class="pdf-mini" style="border:1px solid #e5e7eb;border-radius:8px;padding:6px 12px">${retHTML}</div>
+      </div>
+    </div>
+    <h3 style="font-size:15px;margin:0 0 8px;color:#111827">تفاصيل المبيعات / Sales Details</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr>
+        <th style="padding:6px;background:#f8fafc;border-bottom:2px solid #e5e7eb;text-align:right">التاريخ</th>
+        <th style="padding:6px;background:#f8fafc;border-bottom:2px solid #e5e7eb;text-align:right">المنتج</th>
+        <th style="padding:6px;background:#f8fafc;border-bottom:2px solid #e5e7eb;text-align:right">الكمية</th>
+        <th style="padding:6px;background:#f8fafc;border-bottom:2px solid #e5e7eb;text-align:right">المبلغ</th>
+        <th style="padding:6px;background:#f8fafc;border-bottom:2px solid #e5e7eb;text-align:right">الربح</th>
+        <th style="padding:6px;background:#f8fafc;border-bottom:2px solid #e5e7eb;text-align:right">الزبون</th>
+        <th style="padding:6px;background:#f8fafc;border-bottom:2px solid #e5e7eb;text-align:right">الدفع</th>
+      </tr></thead>
+      <tbody>${tableHTML}</tbody>
+    </table>`;
+  document.body.appendChild(wrap);
+
+  // تحويل ألوان الوضع الداكن إلى ألوان مناسبة للطباعة على خلفية بيضاء
+  wrap.querySelectorAll('.kpi-card').forEach(c => {
+    c.style.cssText += 'background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px 14px;flex:1;min-width:150px;';
+  });
+  wrap.querySelectorAll('.kpi-value').forEach(c => { c.style.color = '#059669'; });
+  wrap.querySelectorAll('.kpi-label').forEach(c => { c.style.color = '#6b7280'; });
+  wrap.querySelectorAll('.kpi-delta').forEach(c => {
+    c.style.cssText += 'display:inline-flex;background:#eef2f7;border-radius:20px;padding:2px 8px;';
+    c.style.color = c.classList.contains('up') ? '#059669' : (c.classList.contains('down') ? '#dc2626' : '#6b7280');
+  });
+  wrap.querySelectorAll('.top-prod-row').forEach(c => {
+    c.style.cssText += 'display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #f1f5f9;color:#111827;';
+  });
+  wrap.querySelectorAll('.top-rank').forEach(c => { c.style.cssText += 'background:#eef2f7;color:#059669;'; });
+  wrap.querySelectorAll('.top-name, .top-qty').forEach(c => { c.style.color = '#111827'; });
+  wrap.querySelectorAll('.top-rev').forEach(c => { c.style.color = '#059669'; });
+  wrap.querySelectorAll('.breakdown-row').forEach(c => { c.style.cssText += 'border-bottom:1px solid #f1f5f9;padding:8px 0;'; });
+  wrap.querySelectorAll('.breakdown-label, .breakdown-value').forEach(c => { c.style.color = '#111827'; });
+  wrap.querySelectorAll('.breakdown-count').forEach(c => { c.style.color = '#6b7280'; });
+  wrap.querySelectorAll('.breakdown-bar').forEach(c => { c.style.cssText += 'background:#eef2f7;'; });
+  wrap.querySelectorAll('.breakdown-bar-fill').forEach(c => { c.style.cssText += 'background:#10b981;'; });
+  wrap.querySelectorAll('.report-mini-stat').forEach(c => {
+    c.style.cssText += 'display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #f1f5f9;color:#111827;';
+  });
+  wrap.querySelectorAll('.report-mini-stat span').forEach(c => { c.style.color = '#6b7280'; });
+  wrap.querySelectorAll('.profit-cell').forEach(c => { c.style.color = '#059669'; });
+  wrap.querySelectorAll('.debt-cell').forEach(c => { c.style.color = '#dc2626'; });
+  wrap.querySelectorAll('td, th').forEach(c => { c.style.color = '#111827'; c.style.borderBottom = '1px solid #f1f5f9'; });
+
+  try {
+    const canvas = await html2canvas(wrap, { scale: 2, backgroundColor: '#ffffff', useCORS: true });
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF('p', 'mm', 'a4');
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const imgW  = pageW;
+    const imgH  = canvas.height * imgW / canvas.width;
+    const imgData = canvas.toDataURL('image/png');
+
+    let heightLeft = imgH;
+    let position   = 0;
+    pdf.addImage(imgData, 'PNG', 0, position, imgW, imgH);
+    heightLeft -= pageH;
+    while (heightLeft > 0) {
+      position = heightLeft - imgH;
+      pdf.addPage();
+      pdf.addImage(imgData, 'PNG', 0, position, imgW, imgH);
+      heightLeft -= pageH;
+    }
+    pdf.save(`تقرير-المبيعات_${from}_${to}.pdf`);
+  } catch (err) {
+    console.error(err);
+    alert('حدث خطأ أثناء إنشاء ملف PDF');
+  } finally {
+    wrap.remove();
+    if (btn) { btn.disabled = false; btn.innerHTML = originalHTML; }
+  }
+}
+
 // ─── Settings ─────────────────────────────────────────────────────────────────
 function loadSettings() {
   const S = DB.Settings.get();
@@ -1623,9 +2539,17 @@ function loadSettings() {
   document.getElementById('set-phone').value        = S.phone || '';
   document.getElementById('set-currency').value     = S.currency || 'دج';
   document.getElementById('set-low-stock').value    = S.lowStockThreshold || 5;
+  document.getElementById('set-expiry-days').value  = S.expiryWarningDays || 15;
   const thanksEl = document.getElementById('set-thanks');
   if (thanksEl) thanksEl.value = S.thankYouMessage || '';
   renderLogoPreview();
+
+  const tierSilverEl = document.getElementById('set-tier-silver');
+  const tierGoldEl   = document.getElementById('set-tier-gold');
+  const tierVipEl    = document.getElementById('set-tier-vip');
+  if (tierSilverEl) tierSilverEl.value = S.custTierSilver || 5000;
+  if (tierGoldEl)   tierGoldEl.value   = S.custTierGold   || 20000;
+  if (tierVipEl)    tierVipEl.value    = S.custTierVip    || 50000;
 
   renderCategories();
 
@@ -1641,6 +2565,25 @@ function loadSettings() {
 
 function saveSettings() {
   const current = DB.Settings.get();
+
+  // حدود تصنيف الزبائن — إن وُجدت الحقول في الصفحة نتحقق من ترتيبها المنطقي
+  const tierSilverEl = document.getElementById('set-tier-silver');
+  const tierGoldEl   = document.getElementById('set-tier-gold');
+  const tierVipEl    = document.getElementById('set-tier-vip');
+  let custTierSilver = current.custTierSilver || 5000;
+  let custTierGold   = current.custTierGold   || 20000;
+  let custTierVip    = current.custTierVip    || 50000;
+  if (tierSilverEl && tierGoldEl && tierVipEl) {
+    const silverVal = parseInt(tierSilverEl.value) || 0;
+    const goldVal    = parseInt(tierGoldEl.value)   || 0;
+    const vipVal     = parseInt(tierVipEl.value)    || 0;
+    if (silverVal > 0 && goldVal > silverVal && vipVal > goldVal) {
+      custTierSilver = silverVal; custTierGold = goldVal; custTierVip = vipVal;
+    } else {
+      toast('حدود تصنيف الزبائن غير صحيحة (يجب أن تكون: فضي < ذهبي < ماسي) — لم يتم تحديثها', 'error');
+    }
+  }
+
   DB.Settings.save({
     ...current,
     storeName:         document.getElementById('set-store-name').value.trim(),
@@ -1648,10 +2591,13 @@ function saveSettings() {
     phone:             document.getElementById('set-phone').value.trim(),
     currency:          document.getElementById('set-currency').value,
     lowStockThreshold: parseInt(document.getElementById('set-low-stock').value) || 5,
-    thankYouMessage:   (document.getElementById('set-thanks')?.value || '').trim()
+    expiryWarningDays: parseInt(document.getElementById('set-expiry-days').value) || 15,
+    thankYouMessage:   (document.getElementById('set-thanks')?.value || '').trim(),
+    custTierSilver, custTierGold, custTierVip
   });
   toast('تم حفظ الإعدادات / Settings saved ✓', 'success');
   checkAlerts();
+  if (document.getElementById('customers-body')) renderCustomers();
 }
 
 // ─── تخصيص الفاتورة: الشعار ─────────────────────────────────────────────────
@@ -1729,16 +2675,34 @@ function confirmReset() {
 
 // ─── Alerts ───────────────────────────────────────────────────────────────────
 function checkAlerts() {
-  const low = DB.Products.lowStock();
+  const low          = DB.Products.lowStock();
+  const expired      = DB.Products.expired();
+  const expiringSoon = DB.Products.expiringSoon();
   const badge = document.getElementById('notif-badge');
   const list  = document.getElementById('notif-list');
-  if (badge) badge.textContent = low.length;
+  const total = low.length + expired.length + expiringSoon.length;
+  if (badge) badge.textContent = total;
   if (list) {
-    list.innerHTML = low.length
-      ? low.map(p => `<div class="notif-item ${p.stock===0?'notif-out':'notif-low'}">
-          <i class="fas fa-${p.stock===0?'ban':'triangle-exclamation'}"></i>
-          <div><strong>${p.nameAr}</strong><br/>${p.stock===0?'نفذ / Out of stock':'مخزون منخفض: '+p.stock+' '+p.unit}</div>
-        </div>`).join('')
+    const stockItems = low.map(p => `<div class="notif-item ${p.stock===0?'notif-out':'notif-low'}">
+        <i class="fas fa-${p.stock===0?'ban':'triangle-exclamation'}"></i>
+        <div><strong>${p.nameAr}</strong><br/>${p.stock===0?'نفذ / Out of stock':'مخزون منخفض: '+p.stock+' '+p.unit}</div>
+      </div>`).join('');
+    const expiredItems = expired.map(p => {
+      const info = expiryInfo(p);
+      return `<div class="notif-item notif-out">
+        <i class="fas fa-skull-crossbones"></i>
+        <div><strong>${p.nameAr}</strong><br/>منتهي الصلاحية: ${fmtDateOnly(p.expiryDate)} (${info.label})</div>
+      </div>`;
+    }).join('');
+    const soonItems = expiringSoon.map(p => {
+      const info = expiryInfo(p);
+      return `<div class="notif-item notif-low">
+        <i class="fas fa-hourglass-half"></i>
+        <div><strong>${p.nameAr}</strong><br/>قرب الانتهاء: ${fmtDateOnly(p.expiryDate)} (${info.label})</div>
+      </div>`;
+    }).join('');
+    list.innerHTML = total
+      ? expiredItems + soonItems + stockItems
       : '<div class="notif-empty"><i class="fas fa-check-circle"></i> لا توجد تنبيهات / No alerts</div>';
   }
 }
@@ -1766,7 +2730,30 @@ function fmtDate(d) {
   catch { return d; }
 }
 function setText(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; }
-function payLabel(m) { return { cash:'نقدي / Cash', card:'بطاقة / Card', credit:'آجل / Credit' }[m] || m; }
+
+// ─── تاريخ الصلاحية: أدوات مساعدة ───────────────────────────────────────────
+// يعرض تاريخاً بصيغة YYYY-MM-DD كتاريخ محلي دون أي انزياح بسبب المنطقة الزمنية
+function fmtDateOnly(d) {
+  if (!d) return '—';
+  const parts = String(d).slice(0, 10).split('-');
+  if (parts.length !== 3) return d;
+  const dt = new Date(+parts[0], +parts[1] - 1, +parts[2]);
+  if (isNaN(dt.getTime())) return d;
+  return dt.toLocaleDateString('ar-DZ', { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+// يحسب حالة صلاحية منتج: منتهي / قريب الانتهاء / سليم / بدون تاريخ
+function expiryInfo(p) {
+  const days = DB.Products.daysToExpiry(p);
+  if (days === null) return null;
+  const S = DB.Settings.get();
+  const warnDays = S.expiryWarningDays || 15;
+  if (days < 0)  return { status: 'expired', badge: 'badge-out', days, label: `منتهي منذ ${Math.abs(days)} يوم` };
+  if (days === 0) return { status: 'expired', badge: 'badge-out', days, label: 'ينتهي اليوم' };
+  if (days <= warnDays) return { status: 'soon', badge: 'badge-low', days, label: `باقي ${days} يوم` };
+  return { status: 'ok', badge: 'badge-ok', days, label: `صالح` };
+}
+function payLabel(m) { return { cash:'نقدي / Cash', card:'بطاقة / Card', credit:'آجل / Credit', mixed:'نقدي + آجل / Split' }[m] || m; }
 
 function toast(msg, type = 'info') {
   const el = document.createElement('div');
@@ -1994,6 +2981,8 @@ function renderInventory() {
   const outOfStock   = products.filter(p => (p.stock || 0) === 0).length;
   const lowStock     = products.filter(p => (p.stock || 0) > 0 && (p.stock || 0) <= (DB.Settings.get().lowStockThreshold || 5)).length;
   const adjToday     = adjs.filter(a => a.date && a.date.startsWith(DB.today())).length;
+  const lossToday    = adjs.filter(a => a.date && a.date.startsWith(DB.today())).reduce((s,a) => s + (a.costImpact || 0), 0);
+  const expiredCount = DB.Products.expired().length;
 
   document.getElementById('inv-summary').innerHTML = `
     <div class="inv-stat-card">
@@ -2023,6 +3012,20 @@ function renderInventory() {
         <div class="inv-stat-val">${adjToday}</div>
         <div class="inv-stat-lbl">تسويات اليوم / Today's Adjustments</div>
       </div>
+    </div>
+    <div class="inv-stat-card">
+      <i class="fas fa-sack-dollar" style="color:#ef4444"></i>
+      <div>
+        <div class="inv-stat-val" style="color:#ef4444">${fmt(lossToday)} ${cur}</div>
+        <div class="inv-stat-lbl">خسائر اليوم / Today's Losses</div>
+      </div>
+    </div>
+    <div class="inv-stat-card ${expiredCount ? 'inv-stat-clickable' : ''}" ${expiredCount ? `onclick="navigateTo('dashboard')"` : ''}>
+      <i class="fas fa-skull-crossbones" style="color:#ef4444"></i>
+      <div>
+        <div class="inv-stat-val" style="color:#ef4444">${expiredCount}</div>
+        <div class="inv-stat-lbl">بانتظار تسوية الصلاحية / Awaiting Expiry Write-off</div>
+      </div>
     </div>`;
 
   // ── سجل التسويات ──
@@ -2047,6 +3050,7 @@ function renderInventory() {
             <th>الكمية الجديدة</th>
             <th>الفرق / Δ</th>
             <th>السبب / Reason</th>
+            <th>الخسارة / Loss</th>
             <th>ملاحظة / Note</th>
           </tr>
         </thead>
@@ -2057,6 +3061,9 @@ function renderInventory() {
             const delta   = a.delta >= 0
               ? `<span style="color:#10b981;font-weight:700">+${a.delta}</span>`
               : `<span style="color:#ef4444;font-weight:700">${a.delta}</span>`;
+            const lossCell = a.costImpact > 0
+              ? `<span style="color:#ef4444;font-weight:700">${fmt(a.costImpact)} ${cur}</span>`
+              : '<span style="color:#6b7280">—</span>';
             return `<tr>
               <td style="font-size:12px;white-space:nowrap">${dateStr}</td>
               <td><strong>${a.productName || ''}</strong>${a.unit ? ' <small>('+a.unit+')</small>' : ''}</td>
@@ -2064,6 +3071,7 @@ function renderInventory() {
               <td style="text-align:center;font-weight:700">${a.newQty}</td>
               <td style="text-align:center">${delta}</td>
               <td><span class="adj-reason-badge">${a.reason || ''}</span></td>
+              <td style="text-align:center">${lossCell}</td>
               <td style="color:#6b7280;font-size:13px">${a.note || '—'}</td>
             </tr>`;
           }).join('')}
@@ -2075,7 +3083,7 @@ function renderInventory() {
 // ── Modal ──
 let _adjSelectedProd = null;
 
-function openAdjModal() {
+function openAdjModal(prefill) {
   _adjSelectedProd = null;
   document.getElementById('adj-prod-search').value = '';
   document.getElementById('adj-prod-id').value = '';
@@ -2086,7 +3094,25 @@ function openAdjModal() {
   document.getElementById('adj-note').value = '';
   document.getElementById('adj-preview').style.display = 'none';
   document.getElementById('modal-inventory').classList.add('active');
-  setTimeout(() => document.getElementById('adj-prod-search')?.focus(), 100);
+
+  if (prefill && prefill.productId) {
+    adjSelectProduct(prefill.productId);
+    if (prefill.reason != null) document.getElementById('adj-reason').value = prefill.reason;
+    if (prefill.newQty != null) document.getElementById('adj-new-qty').value = prefill.newQty;
+    if (prefill.note   != null) document.getElementById('adj-note').value   = prefill.note;
+    adjUpdatePreview();
+  } else {
+    setTimeout(() => document.getElementById('adj-prod-search')?.focus(), 100);
+  }
+}
+
+// ─── تسوية سريعة لمنتج منتهي/قريب الانتهاء الصلاحية (زر "تسوية الآن") ────────
+function writeOffExpired(productId) {
+  const p = DB.Products.byId(productId);
+  if (!p) return;
+  const info = expiryInfo(p);
+  const note = info ? `${info.label} — ${fmtDateOnly(p.expiryDate)}` : 'منتج منتهي الصلاحية';
+  openAdjModal({ productId, reason: 'انتهاء الصلاحية', newQty: 0, note });
 }
 
 function adjSearchProducts() {
@@ -2117,10 +3143,14 @@ function adjSelectProduct(id) {
   const cur = DB.Settings.get().currency || 'دج';
   const info = document.getElementById('adj-prod-info');
   info.style.display = 'block';
+  const expLine = p.expiryDate
+    ? `<div class="adj-info-row"><span>تاريخ الصلاحية:</span> <strong>${fmtDateOnly(p.expiryDate)}</strong></div>`
+    : '';
   info.innerHTML = `
     <div class="adj-info-row"><span>الرصيد الحالي:</span> <strong>${p.stock || 0} ${p.unit || ''}</strong></div>
-    <div class="adj-info-row"><span>سعر البيع:</span> <strong>${(p.price || 0).toFixed(2)} ${cur}</strong></div>
-    <div class="adj-info-row"><span>سعر التكلفة:</span> <strong>${(p.cost || 0).toFixed(2)} ${cur}</strong></div>`;
+    <div class="adj-info-row"><span>سعر البيع:</span> <strong>${fmt(p.sellPrice || 0)} ${cur}</strong></div>
+    <div class="adj-info-row"><span>سعر التكلفة:</span> <strong>${fmt(p.buyPrice || 0)} ${cur}</strong></div>
+    ${expLine}`;
 
   adjUpdatePreview();
 }
@@ -2133,6 +3163,9 @@ function adjUpdatePreview() {
   const delta = newQty - (_adjSelectedProd.stock || 0);
   const sign  = delta >= 0 ? '+' : '';
   const color = delta > 0 ? '#10b981' : delta < 0 ? '#ef4444' : '#6b7280';
+  const cur   = DB.Settings.get().currency || 'دج';
+  // القيمة المالية الدقيقة للخسارة = الكمية الناقصة × سعر التكلفة
+  const lossValue = delta < 0 ? Math.abs(delta) * (_adjSelectedProd.buyPrice || 0) : 0;
   preview.style.display = 'block';
   preview.innerHTML = `
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
@@ -2140,7 +3173,10 @@ function adjUpdatePreview() {
       <i class="fas fa-arrow-left" style="color:#6b7280"></i>
       <span style="font-size:18px;font-weight:700">${newQty} ${_adjSelectedProd.unit || ''}</span>
       <span style="color:${color};font-weight:700;font-size:15px">(${sign}${delta})</span>
-    </div>`;
+    </div>
+    ${lossValue > 0 ? `<div style="margin-top:10px;color:#ef4444;font-weight:700;font-size:13px">
+      <i class="fas fa-circle-exclamation"></i> القيمة المقدّرة للخسارة: ${fmt(lossValue)} ${cur}
+    </div>` : ''}`;
 }
 
 // اربط حدث تغيير الكمية بالمعاينة
@@ -2161,6 +3197,9 @@ function saveAdjustment() {
   closeModal('modal-inventory');
   toast('تم تسوية المخزون بنجاح ✓', 'success');
   renderInventory();
+  if (typeof renderProducts === 'function' && document.getElementById('page-products')?.classList.contains('active')) renderProducts();
+  if (typeof loadDashboard  === 'function' && document.getElementById('page-dashboard')?.classList.contains('active')) loadDashboard();
+  if (typeof checkAlerts    === 'function') checkAlerts();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2225,6 +3264,21 @@ function retSearchInvoice() {
       <span class="inv-total">${fmt(s.total)} ${cur}</span>
     </div>`).join('');
   res.classList.add('open');
+}
+
+// ─── مسح باركود الفاتورة داخل نافذة "مرتجع جديد": اختيار فوري عند التطابق ────
+function retInvKeydown(e) {
+  if (e.key !== 'Enter') return;
+  const q = (document.getElementById('ret-inv-input')?.value || '').trim().toUpperCase();
+  if (!q) return;
+  const exact = DB.Sales.all().find(s => s.invoiceNo.toUpperCase() === q);
+  if (exact) {
+    retSelectInvoice(exact.id);
+  } else {
+    // لا توجد مطابقة تامة (باركود غير معروف) — أبقِ نتائج البحث الجزئي المعروضة
+    retSearchInvoice();
+    toast(`❌ لم يتم العثور على فاتورة بهذا الرقم: ${q}`, 'error');
+  }
 }
 
 // ─── اختيار فاتورة ───────────────────────────────────────────────────────────
@@ -2529,6 +3583,21 @@ function renderReturns() {
   } else if (bar) bar.innerHTML = '';
 }
 
+// ─── مسح باركود (مرتجع أو فاتورة أصلية) من قائمة المرتجعات: فتح فوري ────────
+function retListKeydown(e) {
+  if (e.key !== 'Enter') return;
+  const q = (document.getElementById('ret-search')?.value || '').trim().toUpperCase();
+  if (!q) return;
+  const all = DB.Returns.all();
+  const exact = all.find(r => r.returnNo.toUpperCase() === q || (r.invoiceNo || '').toUpperCase() === q);
+  if (exact) {
+    viewReturn(exact.id);
+  } else {
+    const matches = all.filter(r => r.returnNo.toUpperCase().includes(q) || (r.invoiceNo || '').toUpperCase().includes(q));
+    if (matches.length === 1) viewReturn(matches[0].id);
+  }
+}
+
 // ─── عرض تفاصيل مرتجع ────────────────────────────────────────────────────────
 function viewReturn(id) {
   const r = DB.Returns.byId(id);
@@ -2555,6 +3624,16 @@ function viewReturn(id) {
       </div>
       <span class="refund-badge"><i class="fas fa-rotate-left"></i> مرتجع</span>
     </div>
+    <div class="ret-barcode-row">
+      <div class="ret-barcode-box">
+        <span class="ret-barcode-lbl">باركود المرتجع / Return Barcode</span>
+        ${typeof DakaniBarcode !== 'undefined' ? DakaniBarcode.toSVG(r.returnNo, { unit: 2, height: 42, showText: false }) : ''}
+      </div>
+      ${r.invoiceNo ? `<div class="ret-barcode-box" style="cursor:pointer" onclick="closeModal('modal-return-detail');retOpenOriginalInvoice('${r.invoiceNo}')" title="اضغط لفتح الفاتورة الأصلية / Click to open original invoice">
+        <span class="ret-barcode-lbl">باركود الفاتورة الأصلية / Original Invoice</span>
+        ${typeof DakaniBarcode !== 'undefined' ? DakaniBarcode.toSVG(r.invoiceNo, { unit: 2, height: 42, showText: false }) : ''}
+      </div>` : ''}
+    </div>
     <div class="ret-info-grid">
       <div class="ret-info-cell"><div class="lbl">الزبون</div><div class="val">${r.customerName}</div></div>
       <div class="ret-info-cell"><div class="lbl">الفاتورة الأصلية</div><div class="val">${r.invoiceNo || '—'}</div></div>
@@ -2574,6 +3653,13 @@ function viewReturn(id) {
     </div>`;
 
   openModal('modal-return-detail');
+}
+
+// ─── فتح الفاتورة الأصلية من شاشة تفاصيل المرتجع ─────────────────────────────
+function retOpenOriginalInvoice(invoiceNo) {
+  const s = DB.Sales.all().find(x => x.invoiceNo === invoiceNo);
+  if (!s) { toast('❌ الفاتورة الأصلية غير موجودة (ربما تم حذفها) / Original invoice not found', 'error'); return; }
+  viewInvoice(s.id);
 }
 
 // ─── حذف مرتجع ───────────────────────────────────────────────────────────────
@@ -2599,6 +3685,10 @@ function printReturn() {
       .ret-detail-header { display:flex; justify-content:space-between; margin-bottom:16px; }
       .ret-no { font-size:22px; font-weight:900; }
       .refund-badge { background:#fee2e2; color:#dc2626; padding:4px 12px; border-radius:20px; font-size:12px; font-weight:700; }
+      .ret-barcode-row { display:flex; flex-wrap:wrap; gap:14px; justify-content:center; align-items:flex-start; margin-bottom:16px; background:#f9fafb; border-radius:10px; padding:12px; }
+      .ret-barcode-box { display:flex; flex-direction:column; align-items:center; gap:4px; }
+      .ret-barcode-box svg { max-width:180px; }
+      .ret-barcode-lbl { font-size:10px; color:#6b7280; text-transform:uppercase; }
       .ret-info-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:16px; }
       .ret-info-cell { border:1px solid #e5e7eb; border-radius:6px; padding:8px 12px; }
       .lbl { font-size:10px; color:#6b7280; text-transform:uppercase; }
