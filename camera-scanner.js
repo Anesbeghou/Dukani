@@ -30,6 +30,15 @@ const DakaniScanner = (() => {
     'upc_a', 'upc_e', 'codabar', 'itf', 'qr_code'
   ];
 
+  // بعض المتصفحات (خصوصاً كروم على ويندوز/لينكس) تُعلن أن BarcodeDetector
+  // مدعوم وتُرجع getSupportedFormats() نتيجة صالحة، لكن لا يوجد خلفها أي
+  // محرك اكتشاف حقيقي على مستوى نظام التشغيل → detect() يعمل بدون أي خطأ
+  // لكنه لا يكتشف أي رمز أبداً مهما طال الانتظار. لذا نضع مهلة زمنية: إن لم
+  // يُكتشف أي رمز خلال هذه المدة أثناء عمل المحرك الأصلي، نتحول تلقائياً
+  // إلى ZXing (يعمل عبر JS بحت وبالتالي لا يعتمد على دعم النظام) دون قطع
+  // بث الكاميرا ودون إظهار أي رسالة خطأ للمستخدم.
+  const NATIVE_TIMEOUT_MS = 5000;
+
   // ─── حالة داخلية عامة للجلسة الحالية ───────────────────────────────────
   const state = {
     active: false,
@@ -39,6 +48,7 @@ const DakaniScanner = (() => {
     stream: null,
     devices: [],
     deviceIndex: 0,
+    deviceLocked: false, // يصبح true فقط بعد أن يضغط المستخدم زر تبديل الكاميرا يدوياً
     torchOn: false,
     detectTimer: null,
     lastCode: '',
@@ -305,7 +315,7 @@ const DakaniScanner = (() => {
       return;
     }
 
-    const chosen = state.devices[state.deviceIndex];
+    const chosen = (state.deviceLocked && state.devices[state.deviceIndex]) || null;
     const videoConstraints = chosen
       ? { deviceId: { exact: chosen.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
       : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } };
@@ -329,6 +339,15 @@ const DakaniScanner = (() => {
     if (!state.devices.length) await _listCameras();
 
     const track = state.stream.getVideoTracks()[0];
+
+    if (!state.deviceLocked) {
+      const settings = track && track.getSettings ? track.getSettings() : {};
+      if (settings.deviceId) {
+        const idx = state.devices.findIndex(d => d.deviceId === settings.deviceId);
+        if (idx !== -1) state.deviceIndex = idx;
+      }
+    }
+
     const caps = (track && track.getCapabilities) ? track.getCapabilities() : {};
     if (caps.focusMode && caps.focusMode.includes('continuous')) {
       try { await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch (e) {}
@@ -360,6 +379,7 @@ const DakaniScanner = (() => {
 
   async function _switchCamera() {
     if (state.devices.length < 2) return;
+    state.deviceLocked = true;
     state.deviceIndex = (state.deviceIndex + 1) % state.devices.length;
     await _startCamera();
   }
@@ -383,6 +403,7 @@ const DakaniScanner = (() => {
     if (state.zxingReader) { try { state.zxingReader.reset(); } catch (e) {} state.zxingReader = null; }
     state.detector = null;
     state.engine = null;
+    state.nativeDeadline = 0;
   }
 
   function _loadZXingEngine() {
@@ -423,6 +444,7 @@ const DakaniScanner = (() => {
         if (usable.length) {
           state.detector = new window.BarcodeDetector({ formats: usable });
           state.engine = 'native';
+          state.nativeDeadline = Date.now() + NATIVE_TIMEOUT_MS;
           if (!state.active) return;
           _tickNative();
           return;
@@ -445,6 +467,15 @@ const DakaniScanner = (() => {
         }
       }
     } catch (e) { /* تجاهل أخطاء عابرة أثناء التهيئة */ }
+
+    // ─── حماية من الكاميرات/المتصفحات (غالباً حواسيب ويندوز أو لينكس) التي
+    // تعلن دعم BarcodeDetector دون أن يكون خلفها محرك اكتشاف فعلي: تحويل
+    // صامت إلى ZXing دون إظهار أي خطأ ودون قطع بث الكاميرا ──────────────────
+    if (state.active && state.engine === 'native' && Date.now() > state.nativeDeadline) {
+      _loadZXingEngine();
+      return;
+    }
+
     state.detectTimer = setTimeout(_tickNative, 180);
   }
 
@@ -502,6 +533,7 @@ const DakaniScanner = (() => {
     state.active = true;
     state.onResult = onResult;
     state.deviceIndex = 0;
+    state.deviceLocked = false;
     state.lastCode = '';
     state.lastCodeAt = 0;
     els.frame.classList.remove('dks-success');
