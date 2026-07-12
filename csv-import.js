@@ -12,6 +12,7 @@
  *   stock / مخزون          ← اختياري
  *   minStock / حد_ادنى     ← اختياري
  *   unit / وحدة            ← اختياري
+ *   expiryDate / تاريخ_الصلاحية ← اختياري (بصيغة YYYY-MM-DD)
  * ─────────────────────────────────────────────────────────────
  */
 
@@ -45,6 +46,10 @@ const CSVImport = (() => {
     حد_أدنى:   'minStock',
     unit:      'unit',
     وحدة:      'unit',
+    expirydate: 'expiryDate',
+    تاريخ_الصلاحية: 'expiryDate',
+    تاريخ_انتهاء: 'expiryDate',
+    الصلاحية: 'expiryDate',
   };
 
   // ─── تحليل CSV ────────────────────────────────────────────
@@ -75,6 +80,18 @@ const CSVImport = (() => {
     }
 
     return { headers, rows };
+  }
+
+  // ─── تطبيع تاريخ الصلاحية إلى صيغة YYYY-MM-DD ─────────────
+  // يقبل: 2025-12-31 أو 31/12/2025 أو 31-12-2025
+  function _normalizeDate(str) {
+    if (!str) return '';
+    const s = String(str).trim();
+    let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (m) return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+    m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+    if (m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+    return '';
   }
 
   function _splitCSVLine(line, sep) {
@@ -122,6 +139,7 @@ const CSVImport = (() => {
           stock:     parseFloat(row.stock)     || 0,
           minStock:  parseFloat(row.minStock)  || 5,
           unit:      row.unit || 'قطعة',
+          expiryDate: _normalizeDate(row.expiryDate),
         };
 
         // تحقق من التكرار بالباركود أو الاسم
@@ -152,8 +170,8 @@ const CSVImport = (() => {
   function _renderPreview(rows, container) {
     if (!rows.length) { container.innerHTML = '<p style="color:#6b7280;text-align:center">لا توجد بيانات للعرض</p>'; return; }
 
-    const cols = ['nameAr', 'nameEn', 'barcode', 'category', 'buyPrice', 'sellPrice', 'stock', 'unit'];
-    const labels = { nameAr:'الاسم العربي', nameEn:'الإنجليزي', barcode:'باركود', category:'فئة', buyPrice:'شراء', sellPrice:'بيع', stock:'مخزون', unit:'وحدة' };
+    const cols = ['nameAr', 'nameEn', 'barcode', 'category', 'buyPrice', 'sellPrice', 'stock', 'unit', 'expiryDate'];
+    const labels = { nameAr:'الاسم العربي', nameEn:'الإنجليزي', barcode:'باركود', category:'فئة', buyPrice:'شراء', sellPrice:'بيع', stock:'مخزون', unit:'وحدة', expiryDate:'الصلاحية' };
     const available = cols.filter(c => rows.some(r => r[c]));
 
     const thead = available.map(c => `<th>${labels[c] || c}</th>`).join('');
@@ -372,15 +390,16 @@ const CSVImport = (() => {
     // تحديث واجهة المنتجات
     if (typeof renderProducts === 'function') renderProducts();
     if (typeof loadDashboard  === 'function') loadDashboard();
+    if (typeof checkAlerts    === 'function') checkAlerts();
   }
 
   // ─── تحميل نموذج CSV ──────────────────────────────────────
   function downloadTemplate() {
     const content =
-      'nameAr,nameEn,barcode,category,buyPrice,sellPrice,stock,minStock,unit\n' +
-      'سكر أبيض,White Sugar,6191234567890,مواد غذائية,80,100,50,10,كيس\n' +
-      'زيت ذهبي,Golden Oil,6197654321098,مواد غذائية,150,180,30,5,لتر\n' +
-      'صابون برادة,Soap Bar,,منظفات,40,60,100,20,قطعة\n';
+      'nameAr,nameEn,barcode,category,buyPrice,sellPrice,stock,minStock,unit,expiryDate\n' +
+      'سكر أبيض,White Sugar,6191234567890,مواد غذائية,80,100,50,10,كيس,2026-12-31\n' +
+      'زيت ذهبي,Golden Oil,6197654321098,مواد غذائية,150,180,30,5,لتر,2026-09-15\n' +
+      'صابون برادة,Soap Bar,,منظفات,40,60,100,20,قطعة,\n';
     const blob = new Blob(['\uFEFF' + content], { type: 'text/csv;charset=utf-8' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
