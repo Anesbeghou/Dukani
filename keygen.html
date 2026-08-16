@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8"/>
+  <title>مولّد مفاتيح دكاني – للمالك فقط</title>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Cairo', sans-serif;
+      background: #0a0f1e;
+      color: #e5e7eb;
+      min-height: 100vh;
+      padding: 30px 16px;
+    }
+    .container { max-width: 680px; margin: 0 auto; }
+
+    .header { text-align: center; margin-bottom: 32px; }
+    .header h1 {
+      font-size: 28px; font-weight: 900;
+      background: linear-gradient(135deg, #10b981, #3b82f6);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .header p { color: #6b7280; font-size: 14px; margin-top: 6px; }
+
+    .warning-box {
+      background: rgba(239,68,68,0.1);
+      border: 1px solid rgba(239,68,68,0.3);
+      border-radius: 12px;
+      padding: 14px 18px;
+      margin-bottom: 28px;
+      font-size: 13px;
+      color: #f87171;
+      display: flex; gap: 10px; align-items: flex-start;
+    }
+    .warning-box i { font-size: 16px; margin-top: 2px; flex-shrink: 0; }
+
+    /* شرح آلية العمل */
+    .how-box {
+      background: rgba(59,130,246,0.08);
+      border: 1px solid rgba(59,130,246,0.25);
+      border-radius: 12px;
+      padding: 16px 18px;
+      margin-bottom: 28px;
+      font-size: 13px;
+      color: #93c5fd;
+    }
+    .how-box strong { color: #bfdbfe; display: block; margin-bottom: 8px; font-size: 14px; }
+    .how-box ol { padding-right: 20px; line-height: 2; }
+
+    .card {
+      background: #111827;
+      border: 1px solid #1f2937;
+      border-radius: 16px;
+      padding: 28px;
+      margin-bottom: 20px;
+    }
+    .card h2 {
+      font-size: 16px; font-weight: 700; color: #10b981;
+      margin-bottom: 20px; padding-bottom: 12px;
+      border-bottom: 1px solid #1f2937;
+      display: flex; gap: 8px; align-items: center;
+    }
+
+    .form-group { margin-bottom: 16px; }
+    .form-group label { display: block; color: #9ca3af; font-size: 13px; margin-bottom: 6px; }
+    .form-group input, .form-group select {
+      width: 100%;
+      background: #1f2937; border: 1px solid #374151;
+      color: #fff; border-radius: 10px;
+      padding: 11px 14px; font-size: 14px;
+      font-family: 'Cairo', sans-serif;
+      outline: none; transition: border-color .2s;
+    }
+    .form-group input:focus, .form-group select:focus { border-color: #10b981; }
+
+    /* حقل معرّف الجهاز مميز */
+    .device-input-wrap { position: relative; }
+    .device-input-wrap input {
+      font-family: monospace;
+      font-size: 18px;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      text-align: center;
+      direction: ltr;
+      border-color: #3b82f6 !important;
+      color: #60a5fa;
+      font-weight: 700;
+    }
+    .device-input-wrap input:focus { border-color: #60a5fa !important; }
+    .device-input-hint {
+      color: #4b5563; font-size: 11px; margin-top: 5px; text-align: center;
+    }
+
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+    .btn-gen {
+      width: 100%; padding: 14px;
+      background: linear-gradient(135deg, #10b981, #059669);
+      color: #fff; border: none; border-radius: 12px;
+      font-size: 16px; font-weight: 700; font-family: 'Cairo', sans-serif;
+      cursor: pointer; margin-top: 8px;
+      transition: opacity .2s;
+    }
+    .btn-gen:hover { opacity: 0.9; }
+
+    .result-box {
+      display: none;
+      background: #0d1117;
+      border: 2px solid #10b981;
+      border-radius: 14px;
+      padding: 22px;
+      margin-top: 20px;
+      text-align: center;
+    }
+    .result-box.show { display: block; }
+    .result-label { color: #6b7280; font-size: 12px; margin-bottom: 8px; }
+    .result-key {
+      font-size: 18px; font-weight: 900;
+      letter-spacing: 2px; color: #10b981;
+      direction: ltr; font-family: monospace;
+      background: #111827; border-radius: 10px;
+      padding: 14px; margin-bottom: 14px;
+      user-select: all; cursor: pointer;
+      word-break: break-all;
+    }
+    .result-meta { color: #9ca3af; font-size: 13px; line-height: 1.8; }
+    .result-meta strong { color: #e5e7eb; }
+
+    .copy-btn {
+      background: #1f2937; border: 1px solid #374151;
+      color: #d1d5db; border-radius: 8px;
+      padding: 8px 18px; font-size: 13px;
+      cursor: pointer; font-family: 'Cairo', sans-serif;
+      margin-top: 12px; transition: all .2s;
+    }
+    .copy-btn:hover { border-color: #10b981; color: #10b981; }
+
+    /* History */
+    .history-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .history-table th {
+      text-align: right; padding: 10px 12px;
+      color: #6b7280; font-weight: 600;
+      border-bottom: 1px solid #1f2937;
+    }
+    .history-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #1f2937;
+      color: #d1d5db;
+    }
+    .history-table tr:last-child td { border-bottom: none; }
+    .key-cell { font-family: monospace; color: #10b981; letter-spacing: 1px; font-size: 11px; direction: ltr; text-align: left; word-break: break-all; }
+    .did-cell { font-family: monospace; color: #3b82f6; font-size: 12px; letter-spacing: 2px; direction: ltr; }
+    .tag-valid { color: #10b981; font-size: 11px; }
+    .tag-exp { color: #f87171; font-size: 11px; }
+    .empty-hist { text-align: center; color: #4b5563; padding: 24px; font-size: 13px; }
+
+    .btn-clear-hist {
+      background: transparent; border: 1px solid #374151;
+      color: #6b7280; border-radius: 8px;
+      padding: 6px 14px; font-size: 12px;
+      cursor: pointer; font-family: 'Cairo', sans-serif;
+      float: left; margin-top: -4px;
+    }
+    .btn-clear-hist:hover { border-color: #ef4444; color: #ef4444; }
+
+    @media (max-width: 500px) { .form-row { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <h1><i class="fas fa-key"></i> مولّد مفاتيح دكاني</h1>
+    <p>Dakani License Key Generator – للمالك فقط / Owner Only</p>
+  </div>
+
+  <div class="warning-box">
+    <i class="fas fa-lock"></i>
+    <div>
+      هذا الملف <strong>سري خاص بك</strong> - لا ترفعه مع الموقع على GitHub Pages أبداً.
+      احفظه على جهازك فقط واستخدمه لتوليد المفاتيح للتجار.
+    </div>
+  </div>
+
+  <div class="how-box">
+    <strong><i class="fas fa-info-circle"></i> كيف تعمل الآلية الجديدة؟</strong>
+    <ol>
+      <li>التاجر يفتح الموقع → يظهر له <strong>معرّف جهازه</strong> (6 أحرف)</li>
+      <li>يرسل لك هذا المعرّف عبر واتساب أو أي وسيلة</li>
+      <li>أنت تدخله هنا مع اسمه وتولّد المفتاح</li>
+      <li>المفتاح يعمل <strong>فقط</strong> على جهازه ولا يمكن نقله</li>
+    </ol>
+  </div>
+
+  <div class="how-box" style="background:rgba(245,158,11,0.08);border-color:rgba(245,158,11,0.25);color:#fcd34d;">
+    <strong style="color:#fde68a"><i class="fas fa-triangle-exclamation"></i> تنبيه مهم — معرّفان مختلفان لنفس الجهاز</strong>
+    <ol>
+      <li>عند انتهاء صلاحية <strong>ترخيص التطبيق</strong> (أو محاولة فتح أدوات المطور F12)، يتغيّر <strong>معرّف الجهاز الظاهر في شاشة الترخيص</strong> تلقائياً — هذا مقصود، ليمنع إعادة استخدام نفس مفتاح الترخيص القديم. التاجر يرسل لك المعرّف الجديد وتولّد له مفتاح ترخيص (DKN-) جديداً كالمعتاد.</li>
+      <li>أما <strong>معرّف جهاز مفتاح المدير</strong> (الذي يظهر داخل شاشة "دخول المدير" في التطبيق) فهو <strong>ثابت لا يتغيّر أبداً</strong> — حتى لو انتهى ترخيص التطبيق. مفتاح المدير (MGR-) القديم يبقى يعمل بلا حاجة لتوليد مفتاح مدير جديد.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2><i class="fas fa-plus-circle"></i> توليد مفتاح جديد</h2>
+
+    <div class="form-group">
+      <label><i class="fas fa-fingerprint"></i> معرّف جهاز التاجر (Device ID) — أرسله التاجر إليك</label>
+      <div class="device-input-wrap">
+        <input type="text" id="device-id"
+          placeholder="مثال: A3F2B1"
+          maxlength="6"
+          oninput="this.value = this.value.toUpperCase().replace(/[^A-F0-9]/g,'')"/>
+      </div>
+      <div class="device-input-hint">6 أحرف بالضبط — يجدها التاجر في شاشة التفعيل</div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label><i class="fas fa-user"></i> اسم التاجر</label>
+        <input type="text" id="merchant-name" placeholder="مثال: علي بلعيد"/>
+      </div>
+      <div class="form-group">
+        <label><i class="fas fa-store"></i> اسم المحل</label>
+        <input type="text" id="merchant-store" placeholder="مثال: سوبر ماركت النور"/>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label><i class="fas fa-calendar"></i> مدة الترخيص</label>
+        <select id="duration">
+          <option value="30">شهر واحد (30 يوم)</option>
+          <option value="90">3 أشهر</option>
+          <option value="180">6 أشهر</option>
+          <option value="365" selected>سنة كاملة</option>
+          <option value="730">سنتان</option>
+          <option value="1825">5 سنوات</option>
+          <option value="36500">مدى الحياة (99 سنة)</option>
+          <option value="custom">تاريخ محدد...</option>
+        </select>
+      </div>
+      <div class="form-group" id="custom-date-group" style="display:none">
+        <label><i class="fas fa-calendar-day"></i> تاريخ الانتهاء</label>
+        <input type="date" id="custom-date"/>
+      </div>
+    </div>
+
+    <button class="btn-gen" onclick="generateKey()">
+      <i class="fas fa-wand-magic-sparkles"></i> توليد المفتاح
+    </button>
+
+    <div class="result-box" id="result-box">
+      <div class="result-label">مفتاح الترخيص / License Key</div>
+      <div class="result-key" id="result-key" onclick="copyKey()" title="اضغط للنسخ">—</div>
+      <div class="result-meta" id="result-meta"></div>
+      <button class="copy-btn" onclick="copyKey()"><i class="fas fa-copy"></i> نسخ المفتاح</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>
+      <i class="fas fa-history"></i> سجل المفاتيح المُولَّدة
+      <button class="btn-clear-hist" onclick="clearHistory()">مسح السجل</button>
+    </h2>
+    <div id="history-wrap">
+      <div class="empty-hist"><i class="fas fa-inbox"></i><br/>لا توجد مفاتيح بعد</div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════ مفاتيح المدير (Manager Keys) ═══════════════════════ -->
+  <div class="header" style="margin-top:40px;">
+    <h1 style="font-size:22px;"><i class="fas fa-user-tie"></i> مولّد مفاتيح المدير</h1>
+    <p>Dakani Manager Key Generator — بدون تاريخ انتهاء، مرتبط بالجهاز فقط</p>
+  </div>
+
+  <div class="how-box" style="color:#fcd34d;background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.25);">
+    <strong style="color:#fde68a;"><i class="fas fa-triangle-exclamation"></i> ملاحظات مهمة</strong>
+    <ol>
+      <li>مفتاح المدير <strong>لا ينتهي أبداً</strong> — يبقى صالحاً طالما الجهاز نفسه</li>
+      <li>هذا المعرّف هو نفسه معرّف جهاز الترخيص (يظهر في نفس شاشة التفعيل)</li>
+      <li>لإتاحة المدير على أكثر من جهاز، ولّد مفتاحاً منفصلاً لكل جهاز (معرّف مختلف)</li>
+      <li>عند أول استخدام للمفتاح داخل التطبيق، يُطلب من المدير اسمه ليُحفظ كحساب منفصل</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2><i class="fas fa-key"></i> توليد مفتاح مدير جديد</h2>
+
+    <div class="form-group">
+      <label><i class="fas fa-fingerprint"></i> معرّف جهاز المدير (Device ID)</label>
+      <div class="device-input-wrap">
+        <input type="text" id="mgr-device-id" placeholder="مثال: A3F2B1" maxlength="6"
+          oninput="this.value = this.value.toUpperCase().replace(/[^A-F0-9]/g,'')"/>
+      </div>
+      <div class="device-input-hint">6 أحرف بالضبط — نفس معرّف جهاز الترخيص</div>
+    </div>
+
+    <div class="form-group">
+      <label><i class="fas fa-user-tie"></i> اسم المدير (اختياري، للتوثيق فقط)</label>
+      <input type="text" id="mgr-name" placeholder="مثال: علي بلعيد"/>
+    </div>
+
+    <button class="btn-gen" style="background:linear-gradient(135deg,#f59e0b,#d97706);" onclick="generateManagerKey()">
+      <i class="fas fa-wand-magic-sparkles"></i> توليد مفتاح المدير
+    </button>
+
+    <div class="result-box" id="mgr-result-box">
+      <div class="result-label">مفتاح المدير / Manager Key</div>
+      <div class="result-key" id="mgr-result-key" style="color:#f59e0b;" onclick="copyManagerKey()" title="اضغط للنسخ">—</div>
+      <div class="result-meta" id="mgr-result-meta"></div>
+      <button class="copy-btn" onclick="copyManagerKey()"><i class="fas fa-copy"></i> نسخ المفتاح</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // ══════════════════════════════════════════════════════════════
+  //  ⚠️  نفس السر في license.js - يجب أن يكونا متطابقين تماماً
+  // ══════════════════════════════════════════════════════════════
+  const SECRET = 'DAKANI-2025-SÉTIF-PRO-X9K2';
+
+  function _hash(str) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(16).toUpperCase().padStart(8, '0');
+  }
+
+  // الـ checksum الآن يشمل بصمة الجهاز
+  function _computeChecksum(payload, deviceId) {
+    return _hash(SECRET + payload + deviceId + SECRET).slice(0, 4);
+  }
+
+  function _merchantCode(name) {
+    const upper = name.toUpperCase().replace(/[^A-Z0-9\u0600-\u06FF]/g, '');
+    if (upper.length >= 2) {
+      return _hash(upper).slice(0, 2);
+    }
+    return _hash(name + Date.now()).slice(0, 2);
+  }
+
+  function generateKey() {
+    const deviceId = document.getElementById('device-id').value.trim().toUpperCase();
+    const name     = document.getElementById('merchant-name').value.trim();
+    const store    = document.getElementById('merchant-store').value.trim();
+    const dur      = document.getElementById('duration').value;
+
+    if (!deviceId || deviceId.length !== 6) {
+      alert('أدخل معرّف الجهاز (6 أحرف) الذي أرسله التاجر'); return;
+    }
+    if (!name) { alert('أدخل اسم التاجر'); return; }
+
+    let expiry;
+    if (dur === 'custom') {
+      const cd = document.getElementById('custom-date').value;
+      if (!cd) { alert('اختر تاريخ الانتهاء'); return; }
+      // نُحوّل التاريخ يدوياً لتجنب فارق UTC/محلي
+      const [cy, cm, cday] = cd.split('-').map(Number);
+      expiry = new Date(cy, cm - 1, cday, 23, 59, 59);
+    } else {
+      expiry = new Date();
+      expiry.setDate(expiry.getDate() + parseInt(dur));
+    }
+
+    const dateStr = expiry.getFullYear().toString()
+      + String(expiry.getMonth() + 1).padStart(2, '0')
+      + String(expiry.getDate()).padStart(2, '0');
+
+    const merchantCode = _merchantCode(name);
+
+    // payload = تاريخ(8) + كود التاجر(2) + معرّف الجهاز(6) = 16 حرف
+    const payload  = dateStr + merchantCode + deviceId;
+    const checksum = _computeChecksum(payload, deviceId);
+    const key      = `DKN-${payload}-${checksum}`;
+
+    // عرض النتيجة
+    document.getElementById('result-key').textContent = key;
+    document.getElementById('result-meta').innerHTML = `
+      <strong>التاجر:</strong> ${name} – ${store || '—'}<br/>
+      <strong>الجهاز:</strong> ${deviceId}<br/>
+      <strong>ينتهي في:</strong> ${expiry.toLocaleDateString('ar-DZ', { year:'numeric', month:'long', day:'numeric' })}<br/>
+      <strong>كود التاجر:</strong> ${merchantCode}
+    `;
+    document.getElementById('result-box').classList.add('show');
+
+    saveHistory({ key, name, store, deviceId, expiry: expiry.toISOString(), generatedAt: new Date().toISOString() });
+    renderHistory();
+  }
+
+  function copyKey() {
+    const key = document.getElementById('result-key').textContent;
+    navigator.clipboard.writeText(key).then(() => {
+      const btn = document.querySelector('.copy-btn');
+      const orig = btn.innerHTML;
+      btn.innerHTML = '<i class="fas fa-check"></i> تم النسخ!';
+      btn.style.color = '#10b981';
+      setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; }, 2000);
+    });
+  }
+
+  function saveHistory(entry) {
+    const h = getHistory();
+    h.unshift(entry);
+    localStorage.setItem('dakani_gen_history', JSON.stringify(h.slice(0, 100)));
+  }
+
+  function getHistory() {
+    try { return JSON.parse(localStorage.getItem('dakani_gen_history') || '[]'); } catch { return []; }
+  }
+
+  function clearHistory() {
+    if (confirm('هل تريد مسح كل السجل؟')) {
+      localStorage.removeItem('dakani_gen_history');
+      renderHistory();
+    }
+  }
+
+  function renderHistory() {
+    const h = getHistory();
+    const wrap = document.getElementById('history-wrap');
+    if (!h.length) {
+      wrap.innerHTML = '<div class="empty-hist"><i class="fas fa-inbox"></i><br/>لا توجد مفاتيح بعد</div>';
+      return;
+    }
+    const now = new Date();
+    wrap.innerHTML = `
+      <table class="history-table">
+        <thead>
+          <tr>
+            <th>التاجر</th>
+            <th>الجهاز</th>
+            <th>المفتاح</th>
+            <th>ينتهي</th>
+            <th>الحالة</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${h.map(e => {
+            const exp = new Date(e.expiry);
+            const valid = exp > now;
+            return `
+              <tr>
+                <td>${e.name}<br/><span style="color:#6b7280;font-size:11px">${e.store||''}</span></td>
+                <td class="did-cell">${e.deviceId || '—'}</td>
+                <td class="key-cell" onclick="navigator.clipboard.writeText('${e.key}')" title="نسخ" style="cursor:pointer">${e.key}</td>
+                <td>${exp.toLocaleDateString('ar-DZ')}</td>
+                <td>${valid ? '<span class="tag-valid"><i class="fas fa-check-circle"></i> فعّال</span>' : '<span class="tag-exp"><i class="fas fa-times-circle"></i> منتهي</span>'}</td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+  }
+
+  document.getElementById('duration').addEventListener('change', function() {
+    document.getElementById('custom-date-group').style.display =
+      this.value === 'custom' ? 'block' : 'none';
+  });
+
+  renderHistory();
+
+  // ══════════════════════════════════════════════════════════════
+  //  مفاتيح المدير (Manager Keys)
+  //  ⚠️  نفس MGR_SECRET الموجود في accounts.js - يجب أن يكونا متطابقين
+  //      تماماً، ونفس صيغة الحساب: MGR-<كود2><جهاز6>-<CHK4>، بلا تاريخ.
+  // ══════════════════════════════════════════════════════════════
+  const MGR_SECRET = 'DAKANI-2025-SÉTIF-MGR-Q7L4';
+
+  function _mgrChecksum(payload, deviceId) {
+    return _hash(MGR_SECRET + payload + deviceId + MGR_SECRET).slice(0, 4);
+  }
+
+  function generateManagerKey() {
+    const deviceId = document.getElementById('mgr-device-id').value.trim().toUpperCase();
+    const name     = document.getElementById('mgr-name').value.trim();
+
+    if (!deviceId || deviceId.length !== 6) {
+      alert('أدخل معرّف الجهاز (6 أحرف)'); return;
+    }
+
+    const merchantCode = _merchantCode(name || deviceId);
+    const payload  = merchantCode + deviceId; // 8 أحرف: كود(2) + جهاز(6)
+    const checksum = _mgrChecksum(payload, deviceId);
+    const key      = `MGR-${payload}-${checksum}`;
+
+    document.getElementById('mgr-result-key').textContent = key;
+    document.getElementById('mgr-result-meta').innerHTML = `
+      <strong>المدير:</strong> ${name || '—'}<br/>
+      <strong>الجهاز:</strong> ${deviceId}<br/>
+      <strong>الصلاحية:</strong> بلا تاريخ انتهاء (مرتبط بالجهاز فقط)
+    `;
+    document.getElementById('mgr-result-box').classList.add('show');
+
+    saveHistory({ key, name: name || '(مدير)', store: 'مفتاح مدير / Manager Key', deviceId, expiry: '2099-12-31T23:59:59.000Z', generatedAt: new Date().toISOString() });
+    renderHistory();
+  }
+
+  function copyManagerKey() {
+    const key = document.getElementById('mgr-result-key').textContent;
+    navigator.clipboard.writeText(key).then(() => {
+      const btn = document.querySelectorAll('.copy-btn')[1];
+      const orig = btn.innerHTML;
+      btn.innerHTML = '<i class="fas fa-check"></i> تم النسخ!';
+      btn.style.color = '#10b981';
+      setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; }, 2000);
+    });
+  }
+</script>
+</body>
+</html>
