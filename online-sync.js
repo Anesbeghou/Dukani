@@ -53,7 +53,19 @@ const DakaniOnlineSync = (() => {
   const RECONNECT_MS       = 8 * 1000;  // محاولة إعادة الاتصال بالإنترنت كل 8 ثوانٍ عند الانقطاع
   const PRESENCE_STALE_MS  = 90 * 1000; // اعتبار الجهاز "غير متصل" إن لم نستلم منه شيئاً منذ هذه المدة
 
-  const STUN_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
+  // خوادم STUN لمساعدة الجهازين على معرفة عنوانيهما العامّين، + خادم TURN عام مجاني
+  // للحالات التي يفشل فيها الاتصال المباشر (مثل هاتف على بيانات الجوال خلف NAT صارم) —
+  // بيانات اعتماد openrelay.metered.ca معروفة وعامة (مخصّصة للتجربة من قبل مطوّري WebRTC)،
+  // ولا تمر عبرها بياناتك إلا كـ"تحويلة" مشفّرة عند الحاجة فقط، وليست تخزيناً لأي شيء.
+  const STUN_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:openrelay.metered.ca:80' },
+    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+  ];
+  const LOCAL_ICE_TIMEOUT_MS = 7000; // مهلة انتظار جمع مسارات الاتصال في الوضع المحلي
 
   const RECORD_TABLES = [
     'products', 'categories', 'customers', 'sales', 'sale_items',
@@ -82,6 +94,17 @@ const DakaniOnlineSync = (() => {
   const presence = new Map();
   const seenMsgIds = [];
   const seenMsgSet = new Set();
+
+  // سجل أحداث حيّ (للتشخيص داخل الصفحة نفسها — يظهر بالضبط أين تتعطّل عملية الاتصال)
+  const DEBUG_LOG = [];
+  let sentCount = 0, recvCount = 0;
+  function _log(msg) {
+    const line = new Date().toLocaleTimeString('ar-DZ', { hour12: false }) + ' — ' + msg;
+    DEBUG_LOG.push(line);
+    if (DEBUG_LOG.length > 80) DEBUG_LOG.shift();
+    try { console.log('[Dakani P2P]', msg); } catch (e) {}
+    _renderIfVisible();
+  }
 
   // ─── أدوات عامة (نسخة محلية خاصة بهذا الملف — نفس نمط باقي الملفات) ─
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -351,6 +374,7 @@ const DakaniOnlineSync = (() => {
   }
 
   async function _onConnOpen(c) {
+    _log(`✅ اتصال جديد مفتوح (${c.transport === 'internet' ? 'إنترنت' : 'محلي'}) — جارٍ إرسال التعريف والبيانات...`);
     // أول رسالة: تعريف بالجهاز
     if (!publicIp) publicIp = await _getPublicIP();
     _send(c, { type: 'hello', id: uid(), from: _deviceId(), name: getDeviceName(), ip: publicIp });
@@ -361,18 +385,23 @@ const DakaniOnlineSync = (() => {
     _renderIfVisible();
   }
   function _onConnClose(c) {
+    _log(`⛔ انقطع اتصال (${c.transport === 'internet' ? 'إنترنت' : 'محلي'})${c.remoteName ? ' مع ' + c.remoteName : ''}`);
     _unregisterConn(c.id);
     if (c.remoteId) presence.delete(c.remoteId);
     if (conns.size === 0 && pushTimer) { clearInterval(pushTimer); pushTimer = null; }
     _renderIfVisible();
   }
-  function _send(c, obj) { try { c.send(obj); } catch (e) {} }
+  function _send(c, obj) {
+    try { c.send(obj); sentCount++; }
+    catch (e) { _log('⚠️ فشل إرسال رسالة (' + (obj && obj.type) + '): ' + (e && e.message || e)); }
+  }
 
   function _broadcastToAll(obj) { conns.forEach(c => _send(c, obj)); }
   function _relayToOthers(obj, exceptConnId) { conns.forEach(c => { if (c.id !== exceptConnId) _send(c, obj); }); }
 
   async function _onMessage(msg, c) {
-    if (!msg || !msg.id) return;
+    if (!msg || !msg.id) { _log('⚠️ وصلت رسالة بلا معرّف — تم تجاهلها'); return; }
+    recvCount++;
     if (seenMsgSet.has(msg.id)) return; // منع التكرار/الحلقات عند إعادة البث
     seenMsgSet.add(msg.id); seenMsgIds.push(msg.id);
     if (seenMsgIds.length > 800) { const old = seenMsgIds.shift(); seenMsgSet.delete(old); }
@@ -382,6 +411,7 @@ const DakaniOnlineSync = (() => {
 
     switch (msg.type) {
       case 'hello':
+        _log('📩 استلمت تعريفاً من: ' + (msg.name || msg.from));
         c.remoteId = msg.from; c.remoteName = msg.name; c.remoteIp = msg.ip;
         presence.set(msg.from, { name: msg.name, ip: msg.ip, transport: c.transport, lastSeen: now() });
         _renderIfVisible();
@@ -435,6 +465,7 @@ const DakaniOnlineSync = (() => {
     }
     if (typeof Peer === 'undefined') { _toast('⚠️ تعذّر تحميل مكوّن الاتصال — تحقق من اتصالك بالإنترنت', 'error'); return; }
     if (internetTimer) return; // يعمل بالفعل
+    _log('▶️ بدء وضع الإنترنت — محاولة الاتصال...');
     _tryBecomeHubOrSpoke();
     internetTimer = setInterval(() => {
       if (!peer || peer.destroyed || (!isHub && !_hasOpenInternetConn())) _tryBecomeHubOrSpoke();
@@ -446,47 +477,82 @@ const DakaniOnlineSync = (() => {
     return false;
   }
 
+  function _resetPeer(reason) {
+    if (reason) _log('🔄 إعادة تهيئة الاتصال: ' + reason);
+    if (peer) { try { peer.destroy(); } catch (e) {} }
+    peer = null; isHub = false;
+  }
+
   function _tryBecomeHubOrSpoke() {
     if (peer && !peer.destroyed) return;
     const teamId = getTeamId();
     if (!teamId) return;
+    _log('🔎 محاولة أن أصبح نقطة الالتقاء (hub) لرمز الفريق: ' + teamId);
     let p;
     try { p = new Peer(_hubId(teamId), _peerOpts()); }
-    catch (e) { return; }
+    catch (e) { _log('❌ تعذّر إنشاء اتصال WebRTC: ' + (e && e.message || e)); return; }
     peer = p;
     let settled = false;
 
     p.on('open', () => {
       settled = true;
       isHub = true;
-      p.on('connection', spokeConn => _wirePeerJsConn(spokeConn));
+      _log('👑 أصبحت هذا الجهاز نقطة الالتقاء — بانتظار انضمام الأجهزة الأخرى');
+      p.on('connection', spokeConn => { _log('📞 جهاز آخر يحاول الاتصال بي...'); _wirePeerJsConn(spokeConn); });
     });
 
+    p.on('disconnected', () => { _log('⚠️ انقطع الاتصال بخادم التعارف — سيُعاد المحاولة تلقائياً'); });
+
     p.on('error', err => {
-      if (settled) return; // خطأ لاحق بعد أن أصبحنا hub بالفعل — يُعالج بمنطق آخر
-      if (err && err.type === 'unavailable-id') {
+      const type = err && err.type;
+      _log('⚠️ خطأ اتصال (' + type + ')' + (settled ? ' — بعد أن كنت متصلاً بالفعل' : ''));
+      if (!settled && type === 'unavailable-id') {
         settled = true;
         isHub = false;
         try { p.destroy(); } catch (e) {}
+        peer = null;
         _connectAsSpoke(teamId);
+        return;
       }
+      // أي خطأ آخر (شبكة/خادم/متصفح): لا نبقى عالقين — نصفّر الحالة ليعيد المؤقّت المحاولة تلقائياً
+      _resetPeer(null);
     });
   }
 
   function _connectAsSpoke(teamId) {
     const myId = 'dk-' + teamId + '-' + _deviceId() + '-' + Math.random().toString(36).slice(2, 6);
+    _log('🔗 نقطة الالتقاء مشغولة من جهاز آخر — أتصل بها كعضو في الفريق');
     let p;
-    try { p = new Peer(myId, _peerOpts()); } catch (e) { return; }
+    try { p = new Peer(myId, _peerOpts()); } catch (e) { _log('❌ تعذّر إنشاء اتصال WebRTC: ' + (e && e.message || e)); return; }
     peer = p;
     p.on('open', () => {
       const conn = p.connect(_hubId(teamId), { reliable: true, serialization: 'json' });
       _wirePeerJsConn(conn);
     });
-    p.on('error', () => { try { p.destroy(); } catch (e) {} peer = null; });
+    p.on('error', err => {
+      _log('⚠️ خطأ اتصال كعضو (' + (err && err.type) + ') — ستُعاد المحاولة تلقائياً');
+      _resetPeer(null);
+    });
+  }
+
+  // يراقب الاتصال الفعلي (WebRTC/ICE) خلف PeerJS — يكشف تحديداً حالات فشل عبور الشبكات (NAT)
+  // وهي السبب الأكثر شيوعاً لظهور "متصل" في جهاز و"غير متصل" في الآخر
+  function _watchIceState(peerConn) {
+    try {
+      const pc = peerConn.peerConnection;
+      if (!pc) return;
+      pc.oniceconnectionstatechange = () => {
+        _log('🧭 حالة الشبكة (ICE): ' + pc.iceConnectionState);
+        if (pc.iceConnectionState === 'failed') {
+          _toast('⚠️ فشل الاتصال المباشر بين الجهازين (على الأرجح بسبب شبكة/جدار حماية) — جرّب الوضع المحلي إن كانا على نفس الواي فاي', 'warning');
+        }
+      };
+    } catch (e) {}
   }
 
   function _wirePeerJsConn(peerConn) {
     let c = null;
+    _watchIceState(peerConn);
     peerConn.on('open', () => {
       c = _registerConn(
         obj => peerConn.send(obj),
@@ -497,7 +563,7 @@ const DakaniOnlineSync = (() => {
     });
     peerConn.on('data', d => { if (c) _onMessage(d, c); });
     peerConn.on('close', () => { if (c) _onConnClose(c); });
-    peerConn.on('error', () => { if (c) _onConnClose(c); });
+    peerConn.on('error', err => { _log('⚠️ خطأ في قناة البيانات: ' + (err && err.message || err)); if (c) _onConnClose(c); });
   }
 
   function stopInternetMode() {
@@ -507,6 +573,12 @@ const DakaniOnlineSync = (() => {
     isHub = false;
   }
 
+  function forceReconnect() {
+    _log('🔁 إعادة اتصال يدوية بطلب المستخدم');
+    stopInternetMode();
+    setTimeout(() => startInternetMode(), 300);
+  }
+
   // ════════════════════════════════════════════════════════════
   //  الوضع 2: اتصال محلي مباشر (كيبل/نفس الشبكة) — بدون إنترنت إطلاقاً
   //  تبادل يدوي لـ "رمز دعوة" و"رمز رد" (نسخ/لصق) مرة واحدة فقط لكل زوج أجهزة
@@ -514,9 +586,20 @@ const DakaniOnlineSync = (() => {
   function _waitIceComplete(pc, timeoutMs) {
     return new Promise(resolve => {
       if (pc.iceGatheringState === 'complete') { resolve(); return; }
-      const t = setTimeout(resolve, timeoutMs || 3000);
-      pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); resolve(); } };
+      const t = setTimeout(() => { _log('⏱️ انتهت مهلة تجميع مسارات الاتصال — سنكمل بما تم جمعه حتى الآن'); resolve(); }, timeoutMs || LOCAL_ICE_TIMEOUT_MS);
+      pc.onicegatheringstatechange = () => {
+        _log('📡 حالة تجميع المسارات: ' + pc.iceGatheringState);
+        if (pc.iceGatheringState === 'complete') { clearTimeout(t); resolve(); }
+      };
     });
+  }
+  function _watchLocalPcState(pc) {
+    pc.oniceconnectionstatechange = () => {
+      _log('🧭 حالة الشبكة المحلية (ICE): ' + pc.iceConnectionState);
+      if (pc.iceConnectionState === 'failed') {
+        _toast('⚠️ فشل الاتصال المحلي — تأكّد أن الجهازين على نفس الشبكة (الواي فاي)، أو جرّب وضع الإنترنت', 'warning');
+      }
+    };
   }
   function _encodeCode(obj) { return btoa(unescape(encodeURIComponent(JSON.stringify(obj)))); }
   function _decodeCode(text) {
@@ -526,14 +609,17 @@ const DakaniOnlineSync = (() => {
 
   // الجهاز (أ): يولّد "رمز الدعوة"
   async function localCreateInvite() {
+    if (pendingLocalPC) { _log('ℹ️ استبدال محاولة اتصال محلي سابقة لم تكتمل بمحاولة جديدة'); try { pendingLocalPC.close(); } catch (e) {} pendingLocalPC = null; }
+    _log('📝 إنشاء رمز دعوة جديد...');
     const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+    _watchLocalPcState(pc);
     const channel = pc.createDataChannel('dakani');
     _wireLocalChannel(channel);
-    pc.onicecandidate = () => {}; // نستخدم non-trickle: ننتظر اكتمال التجميع بدل بثّ كل مرشّح
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     await _waitIceComplete(pc);
     pendingLocalPC = pc;
+    _log('✅ رمز الدعوة جاهز — شاركه مع الجهاز الآخر');
     return _encodeCode({ sdp: pc.localDescription, from: _deviceId(), name: getDeviceName() });
   }
 
@@ -541,24 +627,28 @@ const DakaniOnlineSync = (() => {
   async function localAcceptAnswer(answerCode) {
     if (!pendingLocalPC) { _toast('⚠️ لم يبدأ أي اتصال محلي بعد — أنشئ رمز الدعوة أولاً', 'error'); return false; }
     const obj = _decodeCode(answerCode);
-    if (!obj || !obj.sdp) { _toast('⚠️ الرمز غير صحيح', 'error'); return false; }
+    if (!obj || !obj.sdp) { _toast('⚠️ الرمز غير صحيح — تأكد من نسخه كاملاً', 'error'); return false; }
     try {
+      _log('🔗 تطبيق رمز الرد...');
       await pendingLocalPC.setRemoteDescription(obj.sdp);
       pendingLocalPC = null;
       return true;
-    } catch (e) { _toast('❌ تعذّر إتمام الاتصال', 'error'); return false; }
+    } catch (e) { _log('❌ فشل تطبيق رمز الرد: ' + (e && e.message || e)); _toast('❌ تعذّر إتمام الاتصال — تأكد من نسخ الرمز الصحيح والكامل', 'error'); return false; }
   }
 
   // الجهاز (ب): يلصق "رمز الدعوة" القادم من الجهاز (أ) ويولّد "رمز الرد"
   async function localAcceptInvite(inviteCode) {
     const obj = _decodeCode(inviteCode);
-    if (!obj || !obj.sdp) { _toast('⚠️ الرمز غير صحيح', 'error'); return null; }
+    if (!obj || !obj.sdp) { _toast('⚠️ الرمز غير صحيح — تأكد من نسخه كاملاً', 'error'); return null; }
+    _log('📝 توليد رمز رد لدعوة من: ' + (obj.name || obj.from));
     const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+    _watchLocalPcState(pc);
     pc.ondatachannel = e => _wireLocalChannel(e.channel);
     await pc.setRemoteDescription(obj.sdp);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     await _waitIceComplete(pc);
+    _log('✅ رمز الرد جاهز — أعده للجهاز الأول');
     return _encodeCode({ sdp: pc.localDescription, from: _deviceId(), name: getDeviceName() });
   }
 
@@ -844,8 +934,20 @@ const DakaniOnlineSync = (() => {
         </div>
       </div>
       <div class="os-card" style="margin-bottom:16px;">
-        <h3><i class="fas fa-laptop-mobile"></i> الأجهزة المتصلة الآن / Currently Connected</h3>
+        <h3><i class="fas fa-laptop-mobile"></i> الأجهزة المتصلة الآن / Currently Connected
+          <button class="btn-icon" title="إعادة محاولة الاتصال" style="margin-inline-start:auto;" onclick="DakaniOnlineSync.forceReconnect()"><i class="fas fa-rotate"></i></button>
+        </h3>
         ${rows}
+      </div>
+      <div class="os-card" style="margin-bottom:16px;">
+        <h3><i class="fas fa-stethoscope"></i> سجل التشخيص / Diagnostics
+          <span class="os-badge-mode">أرسلت: ${sentCount}</span><span class="os-badge-mode">استلمت: ${recvCount}</span>
+          <button class="btn-icon" title="نسخ السجل" style="margin-inline-start:auto;" onclick="DakaniOnlineSync._copyLog()"><i class="fas fa-copy"></i></button>
+        </h3>
+        <p class="os-hint">إن لم يظهر جهاز آخر، افتح هذا السجل في كلا الجهازين وقارن أين توقفت الأحداث — هذا يوضح بالضبط أين تعطّل الاتصال.</p>
+        <div class="os-code-box" style="max-height:220px; overflow-y:auto; display:block;">
+          ${DEBUG_LOG.length ? DEBUG_LOG.slice().reverse().map(l => `<div style="font-family:monospace; font-size:11px; color:var(--text2,#94a3b8); padding:2px 0; border-bottom:1px solid var(--border,#1e293b);">${escHtml(l)}</div>`).join('') : '<div class="os-hint">لا توجد أحداث بعد</div>'}
+        </div>
       </div>
       <div class="os-hint" style="margin-bottom:10px;"><i class="fas fa-circle-info"></i>
         صور المنتجات لا تُنقَل عبر هذا الجسر (لتفادي إبطاء الاتصال المباشر) — فقط الأسعار والكميات والبيانات النصية.
@@ -858,6 +960,9 @@ const DakaniOnlineSync = (() => {
         <button class="btn-secondary" onclick="DakaniOnlineSync._confirmLeave()"><i class="fas fa-plug-circle-xmark"></i> مغادرة الفريق من هذا الجهاز</button>
       </div>` : ''}
     `;
+  }
+  function _copyLog() {
+    navigator.clipboard?.writeText(DEBUG_LOG.join('\n')).then(() => _toast('تم نسخ سجل التشخيص ✓', 'success')).catch(() => {});
   }
 
   function _submitRename() { renameThisDevice(document.getElementById('os-rename-input')?.value); }
@@ -930,11 +1035,11 @@ const DakaniOnlineSync = (() => {
 
   return {
     init, isConfigured, isConnected, getTeamId, getDeviceName,
-    createOrSetTeam, startInternetMode, stopInternetMode, leaveTeam, kickDevice, renameThisDevice,
+    createOrSetTeam, startInternetMode, stopInternetMode, forceReconnect, leaveTeam, kickDevice, renameThisDevice,
     localCreateInvite, localAcceptInvite, localAcceptAnswer,
     renderOnlineSyncPage, _showOnlineSyncPage,
     _submitGenTeam, _submitJoinTeam, _showLocalCreate, _showLocalAccept,
-    _submitLocalInvite, _submitLocalAnswer, _submitRename, _copyEl, _confirmLeave
+    _submitLocalInvite, _submitLocalAnswer, _submitRename, _copyEl, _copyLog, _confirmLeave
   };
 
 })();
