@@ -49,7 +49,7 @@ const DakaniOnlineSync = (() => {
   const LS_PUSHED     = 'dakani_onlinesync_pushed_v2'; // بصمات آخر ما أُرسل بنجاح — أساس استكمال النقل بعد الانقطاع
   const LS_KICKED_UNTIL = 'dakani_onlinesync_kicked_until';
 
-  const PUSH_INTERVAL_MS   = 20 * 1000; // فحص التغييرات المحلية وبثّها كل 20 ثانية طالما هناك اتصال واحد على الأقل
+  const PUSH_INTERVAL_MS   = 8 * 1000;  // فحص التغييرات المحلية وبثّها كل 8 ثوانٍ طالما هناك اتصال واحد على الأقل — أسرع إحساساً كالتطبيقات الكبرى
   const RECONNECT_MS       = 8 * 1000;  // محاولة إعادة الاتصال بالإنترنت كل 8 ثوانٍ عند الانقطاع
   const PRESENCE_STALE_MS  = 90 * 1000; // اعتبار الجهاز "غير متصل" إن لم نستلم منه شيئاً منذ هذه المدة
 
@@ -388,12 +388,55 @@ const DakaniOnlineSync = (() => {
     _log(`⛔ انقطع اتصال (${c.transport === 'internet' ? 'إنترنت' : 'محلي'})${c.remoteName ? ' مع ' + c.remoteName : ''}`);
     _unregisterConn(c.id);
     if (c.remoteId) presence.delete(c.remoteId);
+    // تنظيف أي أجزاء رسائل كبيرة لم تكتمل بعد لهذا الاتصال (تفادي تسرّب ذاكرة)
+    for (const key of Array.from(chunkBuffers.keys())) { if (key.startsWith(c.id + '|')) chunkBuffers.delete(key); }
     if (conns.size === 0 && pushTimer) { clearInterval(pushTimer); pushTimer = null; }
     _renderIfVisible();
   }
+
+  // ─── إرسال آمن: يقسّم أي رسالة كبيرة إلى أجزاء صغيرة تلقائياً ─────────────
+  // (هذا هو الإصلاح الجوهري لعطل "Message too big for JSON channel" — قنوات
+  // WebRTC/PeerJS لها حد أقصى لحجم الرسالة الواحدة، وبيانات المحل الكاملة
+  // غالباً أكبر من ذلك بكثير)
+  const CHUNK_SIZE = 12000; // بالأحرف — أقل من أي حد معروف لقنوات البيانات (حتى المتحفّظة منها)
+  function _rawSend(c, obj) {
+    try { c.send(obj); }
+    catch (e) { _log('⚠️ فشل إرسال جزء رسالة: ' + (e && e.message || e)); }
+  }
   function _send(c, obj) {
-    try { c.send(obj); sentCount++; }
-    catch (e) { _log('⚠️ فشل إرسال رسالة (' + (obj && obj.type) + '): ' + (e && e.message || e)); }
+    let str;
+    try { str = JSON.stringify(obj); } catch (e) { _log('⚠️ تعذّر تجهيز رسالة للإرسال'); return; }
+    sentCount++;
+    if (str.length <= CHUNK_SIZE) { _rawSend(c, obj); return; }
+    const cid = obj.id || uid();
+    const total = Math.ceil(str.length / CHUNK_SIZE);
+    for (let i = 0; i < total; i++) {
+      _rawSend(c, { type: '__chunk', cid, seq: i, total, part: str.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE) });
+    }
+    _log(`📦 أُرسلت رسالة كبيرة (${(str.length / 1024).toFixed(0)} كيلوبايت) على ${total} جزءاً`);
+  }
+
+  // ─── استقبال: يجمّع أجزاء الرسائل الكبيرة قبل تمريرها للمعالجة العادية ────
+  const chunkBuffers = new Map(); // key: connId+'|'+cid → {parts, total, received}
+  function _onRawMessage(raw, c) {
+    if (!raw) return;
+    if (raw.type === '__chunk') { _handleChunk(raw, c); return; }
+    _onMessage(raw, c);
+  }
+  function _handleChunk(msg, c) {
+    const key = c.id + '|' + msg.cid;
+    let buf = chunkBuffers.get(key);
+    if (!buf) { buf = { parts: new Array(msg.total), received: 0, total: msg.total }; chunkBuffers.set(key, buf); }
+    if (buf.parts[msg.seq] === undefined) buf.received++;
+    buf.parts[msg.seq] = msg.part;
+    if (buf.received === buf.total) {
+      chunkBuffers.delete(key);
+      try {
+        const full = JSON.parse(buf.parts.join(''));
+        _log('📦 اكتمل تجميع رسالة كبيرة (' + msg.total + ' أجزاء) — جارٍ المعالجة');
+        _onMessage(full, c);
+      } catch (e) { _log('❌ فشل تجميع رسالة كبيرة: ' + (e && e.message || e)); }
+    }
   }
 
   function _broadcastToAll(obj) { conns.forEach(c => _send(c, obj)); }
@@ -561,7 +604,7 @@ const DakaniOnlineSync = (() => {
       );
       _onConnOpen(c);
     });
-    peerConn.on('data', d => { if (c) _onMessage(d, c); });
+    peerConn.on('data', d => { if (c) _onRawMessage(d, c); });
     peerConn.on('close', () => { if (c) _onConnClose(c); });
     peerConn.on('error', err => { _log('⚠️ خطأ في قناة البيانات: ' + (err && err.message || err)); if (c) _onConnClose(c); });
   }
@@ -662,7 +705,7 @@ const DakaniOnlineSync = (() => {
       );
       _onConnOpen(c);
     };
-    channel.onmessage = e => { if (c) { try { _onMessage(JSON.parse(e.data), c); } catch (err) {} } };
+    channel.onmessage = e => { if (c) { try { _onRawMessage(JSON.parse(e.data), c); } catch (err) { _log('❌ رسالة غير صالحة عبر الاتصال المحلي'); } } };
     channel.onclose = () => { if (c) _onConnClose(c); };
   }
 
