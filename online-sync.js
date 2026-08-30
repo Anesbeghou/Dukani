@@ -356,7 +356,23 @@ const DakaniOnlineSync = (() => {
         if (msg.singles[key]) { const ok = _mergeLSKeyAdditive(SINGLE_KEYS_LS[key], msg.singles[key]); changed = changed || ok; }
       }
     }
-    if (changed) _clickToast('وصلت بيانات جديدة من جهاز آخر في الفريق — اضغط لتحديث الصفحة', () => location.reload());
+    if (changed) { _log('🔄 دُمجت بيانات جديدة محلياً'); _scheduleAutoRefresh(); }
+  }
+
+  // ─── تحديث تلقائي صامت (بلا أي زر) — يؤجَّل فقط إن كان المستخدم في
+  // منتصف عملية حساسة (نافذة مفتوحة أو داخل صفحة البيع) حتى لا يقاطعه ───
+  let _autoRefreshPending = false;
+  function _scheduleAutoRefresh() {
+    _autoRefreshPending = true;
+    _tryAutoRefresh();
+  }
+  function _tryAutoRefresh() {
+    if (!_autoRefreshPending) return;
+    const modalOpen = !!document.querySelector('.modal-overlay.active');
+    const onSellPage = document.getElementById('page-sell')?.classList.contains('active');
+    if (modalOpen || onSellPage) { setTimeout(_tryAutoRefresh, 5000); return; }
+    _autoRefreshPending = false;
+    location.reload();
   }
 
   // ════════════════════════════════════════════════════════════
@@ -467,8 +483,10 @@ const DakaniOnlineSync = (() => {
       case 'kick':
         if (msg.targetId === _deviceId()) _handleBeingKicked();
         break;
+      case 'ping':
+        break; // مجرد نبضة لإبقاء الاتصال حياً — تحديث lastSeen تم أعلاه بالفعل
     }
-    _relayToOthers(msg, c.id);
+    if (msg.type !== 'ping') _relayToOthers(msg, c.id);
   }
 
   function _handleBeingKicked() {
@@ -485,6 +503,10 @@ const DakaniOnlineSync = (() => {
     if (pushTimer) return;
     pushTimer = setInterval(async () => {
       if (conns.size === 0) return;
+      // نبضة إبقاء حيّ دائمة — حتى إن لم توجد بيانات جديدة، لضمان بقاء الاتصال
+      // مفتوحاً باستمرار طالما الإنترنت متوفر (بعض الشبكات/الراوترات تُغلق
+      // الاتصال الخامل تلقائياً بعد مدة قصيرة من عدم النشاط)
+      _broadcastToAll({ type: 'ping', id: uid(), from: _deviceId() });
       const delta = await _buildOutgoingDelta();
       if (delta && delta.records.length) {
         _broadcastToAll({ type: 'delta', id: uid(), from: _deviceId(), records: delta.records, singles: delta.singles });
@@ -1072,6 +1094,32 @@ const DakaniOnlineSync = (() => {
     _injectSidebarNavItem();
     _wrapNavigateTo();
     _bootIfConfigured();
+    _watchAppLifecycle();
+  }
+
+  // يعيد محاولة الاتصال فوراً عند عودة الإنترنت أو عند إظهار التطبيق مجدداً
+  // (المتصفحات تُبطئ المؤقّتات في الخلفية، فلا يكفي الاعتماد على العدّاد
+  // الدوري وحده) — يعمل بغض النظر عن كون المستخدم الحالي مديراً أو موظفاً،
+  // لأن المزامنة تعمل في الخلفية دوماً بمجرد تفعيلها مرة واحدة
+  function _watchAppLifecycle() {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && isConfigured()) {
+        _log('👀 التطبيق ظاهر الآن — التحقق من الاتصال');
+        _ensureConnected();
+        _tryAutoRefresh();
+      }
+    });
+    window.addEventListener('online', () => {
+      if (isConfigured()) { _log('🌐 عاد الاتصال بالإنترنت — إعادة المحاولة فوراً'); _ensureConnected(); }
+    });
+  }
+  // يضمن محاولة اتصال فورية حتى لو كانت حلقة إعادة المحاولة الدورية تعمل
+  // بالفعل (تلك الحلقة قد تتباطأ في الخلفية على المتصفحات، فلا تكفي وحدها)
+  function _ensureConnected() {
+    if (!isConfigured() || _hasOpenInternetConn()) return;
+    if (peer && !peer.destroyed) _resetPeer('فحص عند العودة للواجهة — لا يوجد اتصال فعلي رغم وجود جلسة سابقة');
+    if (!internetTimer) { startInternetMode(); return; }
+    _tryBecomeHubOrSpoke();
   }
 
   function init() { _boot(); }
