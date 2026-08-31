@@ -49,8 +49,8 @@ const DakaniOnlineSync = (() => {
   const LS_PUSHED     = 'dakani_onlinesync_pushed_v2'; // بصمات آخر ما أُرسل بنجاح — أساس استكمال النقل بعد الانقطاع
   const LS_KICKED_UNTIL = 'dakani_onlinesync_kicked_until';
 
-  const PUSH_INTERVAL_MS   = 8 * 1000;  // فحص التغييرات المحلية وبثّها كل 8 ثوانٍ طالما هناك اتصال واحد على الأقل — أسرع إحساساً كالتطبيقات الكبرى
-  const RECONNECT_MS       = 8 * 1000;  // محاولة إعادة الاتصال بالإنترنت كل 8 ثوانٍ عند الانقطاع
+  const PUSH_INTERVAL_MS   = 3 * 1000;  // فحص التغييرات المحلية وبثّها كل 3 ثوانٍ — إحساس شبه لحظي
+  const RECONNECT_MS       = 3 * 1000;  // محاولة إعادة الاتصال كل 3 ثوانٍ عند الانقطاع — بحث سريع عن الأجهزة
   const PRESENCE_STALE_MS  = 90 * 1000; // اعتبار الجهاز "غير متصل" إن لم نستلم منه شيئاً منذ هذه المدة
 
   // خوادم STUN لمساعدة الجهازين على معرفة عنوانيهما العامّين، + خادم TURN عام مجاني
@@ -507,11 +507,35 @@ const DakaniOnlineSync = (() => {
       // مفتوحاً باستمرار طالما الإنترنت متوفر (بعض الشبكات/الراوترات تُغلق
       // الاتصال الخامل تلقائياً بعد مدة قصيرة من عدم النشاط)
       _broadcastToAll({ type: 'ping', id: uid(), from: _deviceId() });
-      const delta = await _buildOutgoingDelta();
-      if (delta && delta.records.length) {
-        _broadcastToAll({ type: 'delta', id: uid(), from: _deviceId(), records: delta.records, singles: delta.singles });
-      }
+      await _pushNow();
     }, PUSH_INTERVAL_MS);
+  }
+
+  // بثّ فوري خارج الدورة الزمنية — يُستخدم مباشرة بعد حدث مهم (كإتمام بيع)
+  // بدل انتظار الدورة التالية، حتى تصل الفاتورة لبقية الأجهزة خلال أجزاء من الثانية
+  async function _pushNow() {
+    if (conns.size === 0) return;
+    const delta = await _buildOutgoingDelta();
+    if (delta && delta.records.length) {
+      _broadcastToAll({ type: 'delta', id: uid(), from: _deviceId(), records: delta.records, singles: delta.singles });
+      _log('⚡ بثّ فوري (' + delta.records.length + ' عنصر) — لا انتظار للدورة التالية');
+    }
+  }
+
+  // يلتقط لحظة إتمام البيع مباشرة (checkout) ويدفع البيانات فوراً بعدها —
+  // هذا يضمن وصول الفاتورة لبقية الأجهزة خلال ثوانٍ معدودة بدل انتظار الدورة
+  // الدورية. لا يُعدَّل checkout نفسها إطلاقاً، فقط نلتف حولها (نفس أسلوب
+  // التفاف navigateTo أدناه، وهو نمط مستخدم أصلاً وآمن في هذا المشروع)
+  function _wrapCheckout() {
+    if (typeof window.checkout !== 'function' || window.checkout.__dakaniOnlineWrapped) return;
+    const original = window.checkout;
+    const wrapped = function (...args) {
+      const result = original.apply(this, args);
+      setTimeout(() => _pushNow(), 400); // مهلة قصيرة لضمان اكتمال كتابة البيع في القاعدة المحلية أولاً
+      return result;
+    };
+    wrapped.__dakaniOnlineWrapped = true;
+    window.checkout = wrapped;
   }
 
   // ════════════════════════════════════════════════════════════
@@ -566,7 +590,10 @@ const DakaniOnlineSync = (() => {
       p.on('connection', spokeConn => { _log('📞 جهاز آخر يحاول الاتصال بي...'); _wirePeerJsConn(spokeConn); });
     });
 
-    p.on('disconnected', () => { _log('⚠️ انقطع الاتصال بخادم التعارف — سيُعاد المحاولة تلقائياً'); });
+    p.on('disconnected', () => {
+      _log('⚠️ انقطع الاتصال بخادم التعارف — محاولة إعادة اتصال سريعة (دون قطع الأجهزة المرتبطة بالفعل)');
+      if (!p.destroyed) { try { p.reconnect(); } catch (e) { _resetPeer('فشلت إعادة الاتصال السريعة'); } }
+    });
 
     p.on('error', err => {
       const type = err && err.type;
@@ -579,7 +606,12 @@ const DakaniOnlineSync = (() => {
         _connectAsSpoke(teamId);
         return;
       }
-      // أي خطأ آخر (شبكة/خادم/متصفح): لا نبقى عالقين — نصفّر الحالة ليعيد المؤقّت المحاولة تلقائياً
+      // أخطاء الشبكة العابرة لا تُسقط الأجهزة المتصلة فعلياً بالفعل — فقط تمنع اتصالات جديدة مؤقتاً
+      if (_hasOpenInternetConn() && (type === 'network' || type === 'socket-error' || type === 'socket-closed')) {
+        _log('ℹ️ الأجهزة المتصلة حالياً تبقى متصلة رغم هذا الخطأ — سيتعافى الاتصال بخادم التعارف تلقائياً');
+        return;
+      }
+      // أي خطأ آخر (شبكة/خادم/متصفح) بلا اتصالات مفتوحة حالياً: لا نبقى عالقين — نصفّر الحالة ليعيد المؤقّت المحاولة تلقائياً
       _resetPeer(null);
     });
   }
@@ -594,8 +626,14 @@ const DakaniOnlineSync = (() => {
       const conn = p.connect(_hubId(teamId), { reliable: true, serialization: 'json' });
       _wirePeerJsConn(conn);
     });
+    p.on('disconnected', () => {
+      _log('⚠️ انقطع الاتصال بخادم التعارف (كعضو) — محاولة إعادة اتصال سريعة');
+      if (!p.destroyed) { try { p.reconnect(); } catch (e) { _resetPeer('فشلت إعادة الاتصال السريعة (كعضو)'); } }
+    });
     p.on('error', err => {
-      _log('⚠️ خطأ اتصال كعضو (' + (err && err.type) + ') — ستُعاد المحاولة تلقائياً');
+      const type = err && err.type;
+      _log('⚠️ خطأ اتصال كعضو (' + type + ') — ستُعاد المحاولة تلقائياً');
+      if (_hasOpenInternetConn() && (type === 'network' || type === 'socket-error' || type === 'socket-closed')) return;
       _resetPeer(null);
     });
   }
@@ -628,7 +666,7 @@ const DakaniOnlineSync = (() => {
     });
     peerConn.on('data', d => { if (c) _onRawMessage(d, c); });
     peerConn.on('close', () => { if (c) _onConnClose(c); });
-    peerConn.on('error', err => { _log('⚠️ خطأ في قناة البيانات: ' + (err && err.message || err)); if (c) _onConnClose(c); });
+    peerConn.on('error', err => { _log('⚠️ خطأ في قناة البيانات (لن يُغلق الاتصال بسبب هذا وحده): ' + (err && err.message || err)); });
   }
 
   function stopInternetMode() {
@@ -1093,6 +1131,7 @@ const DakaniOnlineSync = (() => {
     _injectStyles();
     _injectSidebarNavItem();
     _wrapNavigateTo();
+    _wrapCheckout();
     _bootIfConfigured();
     _watchAppLifecycle();
   }
