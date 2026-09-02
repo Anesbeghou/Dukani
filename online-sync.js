@@ -82,6 +82,8 @@ const DakaniOnlineSync = (() => {
   let peer = null;                 // كائن PeerJS (وضع الإنترنت فقط)
   let isHub = false;               // هل هذا الجهاز هو نقطة الالتقاء الحالية على الإنترنت؟
   let internetTimer = null;
+  let staleTimer = null;
+  let failedReconnectCycles = 0;
   let pushTimer = null;
   let presenceTimer = null;
   let pendingLocalPC = null;       // اتصال محلي قيد الإنشاء (بانتظار لصق رمز الرد)
@@ -553,12 +555,53 @@ const DakaniOnlineSync = (() => {
       return;
     }
     if (typeof Peer === 'undefined') { _toast('⚠️ تعذّر تحميل مكوّن الاتصال — تحقق من اتصالك بالإنترنت', 'error'); return; }
+    _startStaleWatchdog();
     if (internetTimer) return; // يعمل بالفعل
     _log('▶️ بدء وضع الإنترنت — محاولة الاتصال...');
     _tryBecomeHubOrSpoke();
     internetTimer = setInterval(() => {
-      if (!peer || peer.destroyed || (!isHub && !_hasOpenInternetConn())) _tryBecomeHubOrSpoke();
+      if (!peer || peer.destroyed) { failedReconnectCycles = 0; _tryBecomeHubOrSpoke(); return; }
+      if (isHub) { failedReconnectCycles = 0; return; } // نقطة الالتقاء تنتظر فقط، لا شيء لتفعله
+      if (_hasOpenInternetConn()) { failedReconnectCycles = 0; return; } // كل شيء تمام
+
+      failedReconnectCycles++;
+      const teamId = getTeamId();
+      if (failedReconnectCycles >= 3) {
+        // عدة محاولات خفيفة فشلت — قد تكون نقطة الالتقاء السابقة اختفت نهائياً
+        // (مثلاً أغلق صاحبها التطبيق) — نحاول من جديد بالكامل، وقد يصبح هذا
+        // الجهاز نفسه نقطة الالتقاء الجديدة تلقائياً
+        failedReconnectCycles = 0;
+        _resetPeer('عدة محاولات فاشلة متتالية');
+        _tryBecomeHubOrSpoke();
+        return;
+      }
+      // محاولة خفيفة وسريعة أولاً: إعادة الاتصال بنفس الجلسة الحالية (أسرع من إعادة البناء الكاملة)
+      if (peer && !peer.destroyed && !peer.disconnected && teamId) {
+        _log('🔁 إعادة محاولة الاتصال بنقطة الالتقاء (محاولة ' + failedReconnectCycles + ')');
+        try { _wirePeerJsConn(peer.connect(_hubId(teamId), { reliable: true, serialization: 'json' })); }
+        catch (e) { _resetPeer('فشل إعادة الاتصال السريع'); _tryBecomeHubOrSpoke(); }
+      } else {
+        _tryBecomeHubOrSpoke();
+      }
     }, RECONNECT_MS);
+  }
+
+  // حارس الاتصالات "المتجمّدة": إن لم تصل ولو نبضة واحدة من اتصال ما خلال
+  // مدة معقولة (رغم أننا نرسل نبضة كل 3 ثوانٍ)، فهو على الأرجح ميت فعلياً
+  // حتى لو لم يُخبرنا المتصفح بذلك — نغلقه يدوياً لنفسح المجال لإعادة الاتصال
+  const CONN_STALE_MS = 16000;
+  function _startStaleWatchdog() {
+    if (staleTimer) return;
+    staleTimer = setInterval(() => {
+      const cutoff = Date.now() - CONN_STALE_MS;
+      conns.forEach(c => {
+        if (new Date(c.lastSeen).getTime() < cutoff) {
+          _log('💀 اتصال متجمّد (لا استجابة منذ أكثر من ' + Math.round(CONN_STALE_MS / 1000) + 'ث) — إعادة تأسيسه');
+          try { c.close(); } catch (e) {}
+          _onConnClose(c);
+        }
+      });
+    }, 5000);
   }
 
   function _hasOpenInternetConn() {
@@ -671,6 +714,7 @@ const DakaniOnlineSync = (() => {
 
   function stopInternetMode() {
     if (internetTimer) { clearInterval(internetTimer); internetTimer = null; }
+    if (staleTimer) { clearInterval(staleTimer); staleTimer = null; }
     conns.forEach((c, id) => { if (c.transport === 'internet') { try { c.close(); } catch (e) {} conns.delete(id); } });
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
     isHub = false;
