@@ -361,8 +361,10 @@ const DakaniOnlineSync = (() => {
     if (changed) { _log('🔄 دُمجت بيانات جديدة محلياً'); _scheduleAutoRefresh(); }
   }
 
-  // ─── تحديث تلقائي صامت (بلا أي زر) — يؤجَّل فقط إن كان المستخدم في
-  // منتصف عملية حساسة (نافذة مفتوحة أو داخل صفحة البيع) حتى لا يقاطعه ───
+  // ─── تحديث تلقائي هادئ (بلا أي إعادة تحميل للمتصفح وبلا أي زر) ─────────
+  // نعيد رسم الصفحة الحالية فقط في مكانها (نفس الأسلوب الذي يستخدمه البرنامج
+  // أصلاً بعد "تراجع عن عملية") — لا وميض، لا فقدان مكان المستخدم، ولا مقاطعة
+  // إطلاقاً إن كان في منتصف عملية بيع أو نافذة مفتوحة (يُؤجَّل بصمت لحينها)
   let _autoRefreshPending = false;
   function _scheduleAutoRefresh() {
     _autoRefreshPending = true;
@@ -374,7 +376,36 @@ const DakaniOnlineSync = (() => {
     const onSellPage = document.getElementById('page-sell')?.classList.contains('active');
     if (modalOpen || onSellPage) { setTimeout(_tryAutoRefresh, 5000); return; }
     _autoRefreshPending = false;
-    location.reload();
+    _refreshCurrentPageInPlace();
+    _notifySyncedQuietly();
+  }
+
+  // يعيد رسم الصفحة الظاهرة حالياً فقط عبر استدعاء navigateTo لنفس الصفحة —
+  // نفس ما يفعله البرنامج تماماً بعد أي "تراجع"، فهو آمن ومجرَّب مسبقاً
+  function _refreshCurrentPageInPlace() {
+    try {
+      const activeEl = document.querySelector('.page.active');
+      const page = activeEl ? activeEl.id.replace('page-', '') : '';
+      if (page && page !== 'online-sync' && typeof navigateTo === 'function') navigateTo(page);
+      if (typeof checkAlerts === 'function') checkAlerts();
+      if (typeof updateUndoButton === 'function') updateUndoButton();
+    } catch (e) { _log('⚠️ تعذّر تحديث الصفحة الحالية تلقائياً: ' + (e && e.message || e)); }
+  }
+
+  // تنبيه خفيف جداً يظهر وسط الشاشة السفلي ويختفي من نفسه خلال ثوانٍ — لإعلام
+  // من يشاهد الشاشة (كالمدير) أن مزامنة حدثت، دون طلب أي إجراء أو مقاطعته
+  function _notifySyncedQuietly() {
+    const t = document.createElement('div');
+    t.innerHTML = `<i class="fas fa-check-circle"></i> تمت مزامنة بيانات جديدة من الفريق`;
+    Object.assign(t.style, {
+      position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)',
+      background: 'rgba(16,185,129,.95)', color: '#fff', padding: '9px 18px',
+      borderRadius: '20px', fontFamily: 'Cairo, sans-serif', fontSize: '12.5px',
+      zIndex: '999999', boxShadow: '0 4px 16px rgba(0,0,0,.25)', transition: 'opacity .5s',
+      pointerEvents: 'none', display: 'flex', gap: '6px', alignItems: 'center'
+    });
+    document.body.appendChild(t);
+    setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 500); }, 2500);
   }
 
   // ════════════════════════════════════════════════════════════
