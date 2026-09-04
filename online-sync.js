@@ -54,9 +54,11 @@ const DakaniOnlineSync = (() => {
   const PRESENCE_STALE_MS  = 90 * 1000; // اعتبار الجهاز "غير متصل" إن لم نستلم منه شيئاً منذ هذه المدة
 
   // خوادم STUN لمساعدة الجهازين على معرفة عنوانيهما العامّين، + خادم TURN عام مجاني
-  // للحالات التي يفشل فيها الاتصال المباشر (مثل هاتف على بيانات الجوال خلف NAT صارم) —
-  // بيانات اعتماد openrelay.metered.ca معروفة وعامة (مخصّصة للتجربة من قبل مطوّري WebRTC)،
-  // ولا تمر عبرها بياناتك إلا كـ"تحويلة" مشفّرة عند الحاجة فقط، وليست تخزيناً لأي شيء.
+  // احتياطي للحالات التي يفشل فيها الاتصال المباشر. ⚠️ هذا الخادم المجاني
+  // المشترك (openrelay) خدمة تجريبية غير مضمونة الاستمرار دائماً — للاتصال
+  // الموثوق بين شبكات مختلفة جداً (كواي فاي + بيانات جوال معاً)، يُنصح
+  // بإدخال خادم TURN خاص بك من قسم "إعدادات اتصال متقدمة" في الصفحة (نفس ما
+  // تفعله التطبيقات الكبرى فعلياً — تُشغّل خادم تحويل خاصاً بها).
   const STUN_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
@@ -65,6 +67,15 @@ const DakaniOnlineSync = (() => {
     { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
     { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
   ];
+  const LS_CUSTOM_TURN = 'dakani_onlinesync_custom_turn';
+  function _getIceServers() {
+    const custom = _lsGet(LS_CUSTOM_TURN, null);
+    if (Array.isArray(custom) && custom.length) {
+      // خادمك الخاص يُوضَع أولاً (أولوية أعلى للتجربة)، مع إبقاء الاحتياطي المجاني كطبقة أمان إضافية
+      return custom.concat(STUN_SERVERS);
+    }
+    return STUN_SERVERS;
+  }
   const LOCAL_ICE_TIMEOUT_MS = 7000; // مهلة انتظار جمع مسارات الاتصال في الوضع المحلي
 
   const RECORD_TABLES = [
@@ -575,7 +586,7 @@ const DakaniOnlineSync = (() => {
   //  الوضع 1: عبر الإنترنت (تلقائي — PeerJS لمجرد "التعارف" الأولي)
   // ════════════════════════════════════════════════════════════
   function _peerOpts() {
-    return { config: { iceServers: STUN_SERVERS }, debug: 0 };
+    return { config: { iceServers: _getIceServers(), iceCandidatePoolSize: 6 }, debug: 0 };
   }
 
   function _hubId(teamId) { return 'dkteam-' + teamId; }
@@ -718,10 +729,22 @@ const DakaniOnlineSync = (() => {
     try {
       const pc = peerConn.peerConnection;
       if (!pc) return;
+      let disconnectedCount = 0;
+      const startedAt = Date.now();
       pc.oniceconnectionstatechange = () => {
         _log('🧭 حالة الشبكة (ICE): ' + pc.iceConnectionState);
+        if (pc.iceConnectionState === 'disconnected') {
+          disconnectedCount++;
+          // نمط "checking ← disconnected" المتكرر بلا وصول لـ connected خلال مدة معقولة
+          // = فشل اختراق شبكات NAT بين الجهازين (شائع جداً بين واي فاي وبيانات جوال معاً)
+          // ولا حل له سوى خادم TURN يعمل فعلياً كوسيط تمرير للبيانات
+          if (disconnectedCount >= 3 && Date.now() - startedAt > 15000) {
+            _log('🧩 تشخيص: الشبكتان مختلفتان جداً (NAT صارم) ولا يوجد مسار مباشر بينهما');
+            _toast('⚠️ الشبكتان (واي فاي + بيانات جوال) لا تسمحان باتصال مباشر — أضف خادم TURN خاصاً من "إعدادات اتصال متقدمة" أسفل هذه الصفحة', 'warning');
+          }
+        }
         if (pc.iceConnectionState === 'failed') {
-          _toast('⚠️ فشل الاتصال المباشر بين الجهازين (على الأرجح بسبب شبكة/جدار حماية) — جرّب الوضع المحلي إن كانا على نفس الواي فاي', 'warning');
+          _toast('⚠️ فشل الاتصال المباشر بين الجهازين — أضف خادم TURN خاصاً من "إعدادات اتصال متقدمة"، أو استخدم الوضع المحلي إن كانا على نفس الواي فاي', 'warning');
         }
       };
     } catch (e) {}
@@ -789,7 +812,7 @@ const DakaniOnlineSync = (() => {
   async function localCreateInvite() {
     if (pendingLocalPC) { _log('ℹ️ استبدال محاولة اتصال محلي سابقة لم تكتمل بمحاولة جديدة'); try { pendingLocalPC.close(); } catch (e) {} pendingLocalPC = null; }
     _log('📝 إنشاء رمز دعوة جديد...');
-    const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers: _getIceServers(), iceCandidatePoolSize: 6 });
     _watchLocalPcState(pc);
     const channel = pc.createDataChannel('dakani');
     _wireLocalChannel(channel);
@@ -819,7 +842,7 @@ const DakaniOnlineSync = (() => {
     const obj = _decodeCode(inviteCode);
     if (!obj || !obj.sdp) { _toast('⚠️ الرمز غير صحيح — تأكد من نسخه كاملاً', 'error'); return null; }
     _log('📝 توليد رمز رد لدعوة من: ' + (obj.name || obj.from));
-    const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers: _getIceServers(), iceCandidatePoolSize: 6 });
     _watchLocalPcState(pc);
     pc.ondatachannel = e => _wireLocalChannel(e.channel);
     await pc.setRemoteDescription(obj.sdp);
@@ -1132,6 +1155,7 @@ const DakaniOnlineSync = (() => {
         المزامنة تراكمية فقط: لا يُحذف أي شيء محلياً تلقائياً حتى لو حُذف في جهاز آخر.
         كذلك: يجب أن يكون الجهازان مفتوحين معاً (أو يتداخل وقت فتحهما) لينتقل أي تحديث بينهما مباشرة أو عبر جهاز وسيط من نفس الفريق.
       </div>
+      ${manager ? _advancedSettingsHtml() : ''}
       ${manager ? `
       <div class="os-danger-zone">
         <h4><i class="fas fa-triangle-exclamation"></i> منطقة خطرة — للمدير فقط</h4>
@@ -1141,6 +1165,85 @@ const DakaniOnlineSync = (() => {
   }
   function _copyLog() {
     navigator.clipboard?.writeText(DEBUG_LOG.join('\n')).then(() => _toast('تم نسخ سجل التشخيص ✓', 'success')).catch(() => {});
+  }
+
+  // ─── إعدادات اتصال متقدمة: خادم TURN خاص ─────────────────────────────────
+  // الخادم المجاني الاحتياطي المدمج قد لا يكفي دائماً بين شبكات مختلفة جداً
+  // (كواي فاي + بيانات جوال معاً). الحل الموثوق (وهو ما تفعله التطبيقات
+  // الكبرى فعلياً) هو استخدام خادم TURN مخصّص. يمكن الحصول على واحد مجاناً
+  // بحساب شخصي (وليس بيانات تجريبية مشتركة) من مزوّدين مثل metered.ca أو
+  // Xirsys — يعطيانك عنوان خادم واسم مستخدم وكلمة مرور تُلصق هنا مباشرة.
+  function _advancedSettingsHtml() {
+    const cur = _lsGet(LS_CUSTOM_TURN, null);
+    const hasCustom = Array.isArray(cur) && cur.length > 0;
+    return `
+      <div class="os-card" style="margin-bottom:16px;">
+        <h3><i class="fas fa-sliders"></i> إعدادات اتصال متقدمة / Advanced connection settings</h3>
+        <p class="os-hint">
+          إن كانت بعض الأجهزة لا تتصل ببعضها (خصوصاً بين واي فاي وبيانات جوال معاً)، أضف خادم TURN خاصاً بك هنا
+          لضمان اتصال موثوق دائماً. احصل على واحد مجاناً بحساب شخصي (وليس بيانات تجريبية مشتركة) من
+          <a href="https://dashboard.metered.ca/signup" target="_blank" rel="noopener">dashboard.metered.ca/signup</a>.
+        </p>
+        <p class="os-hint"><strong>الطريقة الأسهل:</strong> بعد إنشاء الحساب وتوليد أول بيانات اعتماد، ستجد زراً باسم
+          "Show ICE Servers Array" أو "Instructions" — اضغطه وانسخ كل ما يظهر (يبدأ بـ <code>[</code> وينتهي بـ <code>]</code>)، والصقه هنا كاملاً:</p>
+        <div class="form-group"><label>الصق مصفوفة iceServers كاملة هنا (الأسهل)</label>
+          <textarea id="os-turn-array" rows="5" placeholder='[{"urls":"stun:...","...":"..."}, {"urls":"turn:...","username":"...","credential":"..."}]'></textarea>
+        </div>
+        <button class="btn-primary" onclick="DakaniOnlineSync._saveCustomTurnArray()"><i class="fas fa-floppy-disk"></i> حفظ من المصفوفة الملصقة</button>
+
+        <p class="os-hint" style="margin-top:16px;">— أو أدخل خادماً واحداً يدوياً إن كنت تفضّل ذلك —</p>
+        <div class="form-group"><label>عنوان الخادم / TURN URL</label>
+          <input type="text" id="os-turn-url" placeholder="turn:example.com:80"/>
+        </div>
+        <div class="form-group"><label>اسم المستخدم / Username</label>
+          <input type="text" id="os-turn-user" placeholder="username"/>
+        </div>
+        <div class="form-group"><label>كلمة المرور / Credential</label>
+          <input type="text" id="os-turn-pass" placeholder="credential"/>
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn-secondary" onclick="DakaniOnlineSync._saveCustomTurn()"><i class="fas fa-floppy-disk"></i> حفظ الخادم اليدوي</button>
+          ${hasCustom ? `<button class="btn-secondary" onclick="DakaniOnlineSync._clearCustomTurn()"><i class="fas fa-trash"></i> إزالة الخادم المخصّص</button>` : ''}
+        </div>
+        ${hasCustom ? `<p class="os-hint"><i class="fas fa-check-circle" style="color:var(--accent,#10b981);"></i> خادم مخصّص مُفعَّل حالياً (${cur.length} إدخال) كأولوية أولى.</p>` : ''}
+      </div>`;
+  }
+  function _parseIceArrayPaste(text) {
+    try {
+      const start = text.indexOf('['), end = text.lastIndexOf(']');
+      if (start === -1 || end === -1) return null;
+      let body = text.slice(start, end + 1).replace(/,(\s*[\]}])/g, '$1'); // إزالة فواصل زائدة قبل ] أو }
+      const arr = JSON.parse(body);
+      return (Array.isArray(arr) && arr.length) ? arr.filter(e => e && e.urls) : null;
+    } catch (e) { return null; }
+  }
+  function _saveCustomTurnArray() {
+    const text = document.getElementById('os-turn-array')?.value || '';
+    const arr = _parseIceArrayPaste(text);
+    if (!arr || !arr.length) { _toast('⚠️ تعذّر قراءة المصفوفة — تأكد من نسخها كاملة من [ إلى ]', 'error'); return; }
+    _lsSet(LS_CUSTOM_TURN, arr);
+    _log('⚙️ حُفظت مصفوفة TURN مخصّصة (' + arr.length + ' إدخال) — إعادة الاتصال الآن');
+    _toast('✅ تم الحفظ — جارٍ إعادة الاتصال', 'success');
+    forceReconnect();
+    renderOnlineSyncPage();
+  }
+  function _saveCustomTurn() {
+    const urls = document.getElementById('os-turn-url')?.value.trim();
+    const username = document.getElementById('os-turn-user')?.value.trim();
+    const credential = document.getElementById('os-turn-pass')?.value.trim();
+    if (!urls) { _toast('أدخل عنوان الخادم أولاً', 'warning'); return; }
+    _lsSet(LS_CUSTOM_TURN, [{ urls, username, credential }]);
+    _log('⚙️ حُفظ خادم TURN مخصّص — إعادة الاتصال به الآن');
+    _toast('✅ تم الحفظ — جارٍ إعادة الاتصال', 'success');
+    forceReconnect();
+    renderOnlineSyncPage();
+  }
+  function _clearCustomTurn() {
+    _lsDel(LS_CUSTOM_TURN);
+    _log('⚙️ أُزيل خادم TURN المخصّص — العودة للخادم الاحتياطي المدمج');
+    _toast('تمت الإزالة', 'info');
+    forceReconnect();
+    renderOnlineSyncPage();
   }
 
   function _submitRename() { renameThisDevice(document.getElementById('os-rename-input')?.value); }
@@ -1244,7 +1347,8 @@ const DakaniOnlineSync = (() => {
     localCreateInvite, localAcceptInvite, localAcceptAnswer,
     renderOnlineSyncPage, _showOnlineSyncPage,
     _submitGenTeam, _submitJoinTeam, _showLocalCreate, _showLocalAccept,
-    _submitLocalInvite, _submitLocalAnswer, _submitRename, _copyEl, _copyLog, _confirmLeave
+    _submitLocalInvite, _submitLocalAnswer, _submitRename, _copyEl, _copyLog, _confirmLeave,
+    _saveCustomTurn, _saveCustomTurnArray, _clearCustomTurn
   };
 
 })();
