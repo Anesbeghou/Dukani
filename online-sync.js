@@ -62,6 +62,8 @@ const DakaniOnlineSync = (() => {
   const STUN_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
     { urls: 'stun:openrelay.metered.ca:80' },
     { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
     { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
@@ -1178,22 +1180,29 @@ const DakaniOnlineSync = (() => {
     const hasCustom = Array.isArray(cur) && cur.length > 0;
     return `
       <div class="os-card" style="margin-bottom:16px;">
-        <h3><i class="fas fa-sliders"></i> إعدادات اتصال متقدمة / Advanced connection settings</h3>
+        <h3><i class="fas fa-sliders"></i> إعدادات اتصال متقدمة (اختياري) / Advanced connection settings</h3>
         <p class="os-hint">
-          إن كانت بعض الأجهزة لا تتصل ببعضها (خصوصاً بين واي فاي وبيانات جوال معاً)، أضف خادم TURN خاصاً بك هنا
-          لضمان اتصال موثوق دائماً. احصل على واحد مجاناً بحساب شخصي (وليس بيانات تجريبية مشتركة) من
-          <a href="https://dashboard.metered.ca/signup" target="_blank" rel="noopener">dashboard.metered.ca/signup</a>.
+          التطبيق يحاول تلقائياً عدة خوادم مجانية بلا أي تسجيل حساب لمساعدة الأجهزة على الاتصال ببعضها.
+          هذا يكفي في الغالبية العظمى من الحالات. لكن أصعب حالة (كواي فاي مع بيانات جوال معاً على شبكتين مختلفتين
+          تماماً) قد تحتاج أحياناً خادم "تحويل" (TURN) إضافياً أوثق — وهذا اختياري تماماً، لا داعي له إن كان
+          الاتصال يعمل عندك فعلاً.
         </p>
-        <p class="os-hint"><strong>الطريقة الأسهل:</strong> بعد إنشاء الحساب وتوليد أول بيانات اعتماد، ستجد زراً باسم
-          "Show ICE Servers Array" أو "Instructions" — اضغطه وانسخ كل ما يظهر (يبدأ بـ <code>[</code> وينتهي بـ <code>]</code>)، والصقه هنا كاملاً:</p>
+        <p class="os-hint">
+          لا يوجد للأسف خادم TURN مجاني بالكامل يعمل بلا أي تسجيل حساب لأن تشغيله يكلّف مزوّده فعلياً (نقل بيانات حقيقي) —
+          حتى التطبيقات الكبرى (واتساب، زوم) تُشغّل خوادمها الخاصة. أقرب حل بلا أي تكلفة فعلية هو تسجيل بريد إلكتروني
+          فقط (بلا بطاقة بنكية) في خدمة مثل <a href="https://www.expressturn.com" target="_blank" rel="noopener">expressturn.com</a>
+          (تعطي 1000 جيجابايت مجاناً شهرياً بلا بطاقة بنكية)، ثم لصق بيانات الاتصال هنا.
+        </p>
+        <p class="os-hint"><strong>الطريقة الأسهل:</strong> إن استخدمت خدمة تعطيك مصفوفة iceServers جاهزة، انسخها كاملة
+          (تبدأ بـ <code>[</code> وتنتهي بـ <code>]</code>) والصقها هنا مباشرة:</p>
         <div class="form-group"><label>الصق مصفوفة iceServers كاملة هنا (الأسهل)</label>
           <textarea id="os-turn-array" rows="5" placeholder='[{"urls":"stun:...","...":"..."}, {"urls":"turn:...","username":"...","credential":"..."}]'></textarea>
         </div>
         <button class="btn-primary" onclick="DakaniOnlineSync._saveCustomTurnArray()"><i class="fas fa-floppy-disk"></i> حفظ من المصفوفة الملصقة</button>
 
-        <p class="os-hint" style="margin-top:16px;">— أو أدخل خادماً واحداً يدوياً إن كنت تفضّل ذلك —</p>
+        <p class="os-hint" style="margin-top:16px;">— أو أدخل خادماً واحداً يدوياً (مثلاً بصيغة turn:host:port من لوحة تحكم expressturn) —</p>
         <div class="form-group"><label>عنوان الخادم / TURN URL</label>
-          <input type="text" id="os-turn-url" placeholder="turn:example.com:80"/>
+          <input type="text" id="os-turn-url" placeholder="turn:example.com:3478"/>
         </div>
         <div class="form-group"><label>اسم المستخدم / Username</label>
           <input type="text" id="os-turn-user" placeholder="username"/>
