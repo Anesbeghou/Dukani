@@ -94,6 +94,7 @@ const DakaniOnlineSync = (() => {
   // ─── حالة التشغيل (في الذاكرة فقط) ───────────────────────────
   let peer = null;                 // كائن PeerJS (وضع الإنترنت فقط)
   let isHub = false;               // هل هذا الجهاز هو نقطة الالتقاء الحالية على الإنترنت؟
+  let spokeConnecting = false;     // يمنع محاولات اتصال متزامنة مكرّرة بنقطة الالتقاء
   let internetTimer = null;
   let staleTimer = null;
   let failedReconnectCycles = 0;
@@ -267,6 +268,49 @@ const DakaniOnlineSync = (() => {
     });
   }
 
+  // نسخة مُجمَّعة: تطبّق كل تحديثات جدول واحد بفتح اتصال واحد فقط بدل فتح
+  // اتصال IndexedDB منفصل لكل سجل — فرق جوهري في الأداء عند وصول لقطة أولى
+  // كاملة (مئات المنتجات/الفواتير دفعة واحدة عند انضمام جهاز جديد للفريق)
+  function _upsertRecordsBatch(table, items) {
+    return new Promise(resolve => {
+      if (!items || !items.length) { resolve(false); return; }
+      try {
+        const req = indexedDB.open('DakaniDB', 1);
+        req.onsuccess = e => {
+          const idb = e.target.result;
+          const tx = idb.transaction('keyval', 'readwrite');
+          const store = tx.objectStore('keyval');
+          const key = 'dakani_' + table;
+          const r = store.get(key);
+          r.onsuccess = () => {
+            const list = Array.isArray(r.result) ? r.result.slice() : [];
+            const indexById = new Map(list.map((x, idx) => [x && x.id, idx]));
+            let changedAny = false;
+            for (const item of items) {
+              if (!item || item.id === undefined) continue;
+              const i = indexById.has(item.id) ? indexById.get(item.id) : -1;
+              if (i > -1) {
+                const localTime = list[i].updatedAt || list[i].createdAt || '';
+                const incomingTime = item.updatedAt || item.createdAt || '';
+                if (incomingTime && localTime && incomingTime <= localTime) continue;
+                list[i] = item; changedAny = true;
+              } else {
+                indexById.set(item.id, list.length);
+                list.push(item); changedAny = true;
+              }
+            }
+            if (!changedAny) { resolve(false); return; }
+            store.put(list, key);
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+          };
+          r.onerror = () => resolve(false);
+        };
+        req.onerror = () => resolve(false);
+      } catch (e) { resolve(false); }
+    });
+  }
+
   function _mergeSettings(remoteSettings) {
     return new Promise(resolve => {
       try {
@@ -332,9 +376,15 @@ const DakaniOnlineSync = (() => {
     for (const key in SINGLE_KEYS_LS) {
       try { singles[key] = JSON.parse(localStorage.getItem(SINGLE_KEYS_LS[key]) || '[]'); } catch (e) { singles[key] = []; }
     }
+    // بصمة خفيفة لمجموعة singles (منفصلة تماماً عن تتبّع السجلات) — بدون هذا
+    // كانت تغييرات الصندوق/الموظفين/الإعدادات تُهمَل بالكامل إن لم يتغيّر أي
+    // منتج أو فاتورة معها في نفس الدورة، وهي عِلّة حقيقية أصلحناها هنا
+    const singlesStr = JSON.stringify(singles);
+    const singlesSig = singlesStr.length + ':' + singlesStr.slice(-80);
+    const singlesChanged = pushedMap.__singlesSig !== singlesSig;
+    if (singlesChanged) pushedMap.__singlesSig = singlesSig;
     _lsSet(LS_PUSHED, pushedMap);
-    if (!records.length) return { records: [], singles: null };
-    return { records, singles };
+    return { records, singles: singlesChanged ? singles : null };
   }
 
   // رسالة كاملة (تُرسَل مرة واحدة فقط لكل اتصال جديد، لضمان التقاء البيانات فوراً)
@@ -358,10 +408,14 @@ const DakaniOnlineSync = (() => {
 
   async function _applyIncoming(msg) {
     let changed = false;
-    if (Array.isArray(msg.records)) {
+    if (Array.isArray(msg.records) && msg.records.length) {
+      const byTable = {};
       for (const rec of msg.records) {
         if (!rec || !rec.t || rec.id === undefined) continue;
-        const applied = await _upsertRecord(rec.t, rec.data);
+        (byTable[rec.t] = byTable[rec.t] || []).push(rec.data);
+      }
+      for (const table in byTable) {
+        const applied = await _upsertRecordsBatch(table, byTable[table]);
         if (applied) changed = true;
       }
     }
@@ -562,9 +616,9 @@ const DakaniOnlineSync = (() => {
   async function _pushNow() {
     if (conns.size === 0) return;
     const delta = await _buildOutgoingDelta();
-    if (delta && delta.records.length) {
+    if (delta && (delta.records.length || delta.singles)) {
       _broadcastToAll({ type: 'delta', id: uid(), from: _deviceId(), records: delta.records, singles: delta.singles });
-      _log('⚡ بثّ فوري (' + delta.records.length + ' عنصر) — لا انتظار للدورة التالية');
+      _log('⚡ بثّ فوري (' + delta.records.length + ' سجل' + (delta.singles ? ' + بيانات صندوق/إعدادات' : '') + ')');
     }
   }
 
@@ -615,15 +669,18 @@ const DakaniOnlineSync = (() => {
         // (مثلاً أغلق صاحبها التطبيق) — نحاول من جديد بالكامل، وقد يصبح هذا
         // الجهاز نفسه نقطة الالتقاء الجديدة تلقائياً
         failedReconnectCycles = 0;
+        spokeConnecting = false;
         _resetPeer('عدة محاولات فاشلة متتالية');
         _tryBecomeHubOrSpoke();
         return;
       }
+      if (spokeConnecting) return; // محاولة سابقة لم تُحسم بعد — لا نُنشئ اتصالاً مكرَّراً فوقها
       // محاولة خفيفة وسريعة أولاً: إعادة الاتصال بنفس الجلسة الحالية (أسرع من إعادة البناء الكاملة)
       if (peer && !peer.destroyed && !peer.disconnected && teamId) {
         _log('🔁 إعادة محاولة الاتصال بنقطة الالتقاء (محاولة ' + failedReconnectCycles + ')');
+        spokeConnecting = true;
         try { _wirePeerJsConn(peer.connect(_hubId(teamId), { reliable: true, serialization: 'json' })); }
-        catch (e) { _resetPeer('فشل إعادة الاتصال السريع'); _tryBecomeHubOrSpoke(); }
+        catch (e) { spokeConnecting = false; _resetPeer('فشل إعادة الاتصال السريع'); _tryBecomeHubOrSpoke(); }
       } else {
         _tryBecomeHubOrSpoke();
       }
@@ -656,7 +713,7 @@ const DakaniOnlineSync = (() => {
   function _resetPeer(reason) {
     if (reason) _log('🔄 إعادة تهيئة الاتصال: ' + reason);
     if (peer) { try { peer.destroy(); } catch (e) {} }
-    peer = null; isHub = false;
+    peer = null; isHub = false; spokeConnecting = false;
   }
 
   function _tryBecomeHubOrSpoke() {
@@ -756,6 +813,7 @@ const DakaniOnlineSync = (() => {
     let c = null;
     _watchIceState(peerConn);
     peerConn.on('open', () => {
+      spokeConnecting = false;
       c = _registerConn(
         obj => peerConn.send(obj),
         () => peerConn.close(),
@@ -764,8 +822,8 @@ const DakaniOnlineSync = (() => {
       _onConnOpen(c);
     });
     peerConn.on('data', d => { if (c) _onRawMessage(d, c); });
-    peerConn.on('close', () => { if (c) _onConnClose(c); });
-    peerConn.on('error', err => { _log('⚠️ خطأ في قناة البيانات (لن يُغلق الاتصال بسبب هذا وحده): ' + (err && err.message || err)); });
+    peerConn.on('close', () => { spokeConnecting = false; if (c) _onConnClose(c); });
+    peerConn.on('error', err => { spokeConnecting = false; _log('⚠️ خطأ في قناة البيانات (لن يُغلق الاتصال بسبب هذا وحده): ' + (err && err.message || err)); });
   }
 
   function stopInternetMode() {
@@ -773,7 +831,7 @@ const DakaniOnlineSync = (() => {
     if (staleTimer) { clearInterval(staleTimer); staleTimer = null; }
     conns.forEach((c, id) => { if (c.transport === 'internet') { try { c.close(); } catch (e) {} conns.delete(id); } });
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
-    isHub = false;
+    isHub = false; spokeConnecting = false;
   }
 
   function forceReconnect() {
@@ -810,9 +868,28 @@ const DakaniOnlineSync = (() => {
     catch (e) { return null; }
   }
 
+  // يوحّد رمز الفريق بين الجهازين المتزاوجين محلياً: إن لم يكن عندي رمز أصلاً
+  // أتبنّى رمز الطرف الآخر. إن كان عندي رمز مختلف مسبقاً، أُبقيه (حالة نادرة:
+  // كل جهاز كان جزءاً من فريق مختلف من قبل) وأكتفي بتنبيه في السجل، لأن
+  // الاتصال المباشر بين هذين الجهازين يبقى يعمل بغض النظر عن رمز الفريق.
+  function _reconcileTeamId(remoteTeamId) {
+    if (!remoteTeamId) return;
+    const mine = getTeamId();
+    if (!mine) {
+      createOrSetTeam(remoteTeamId, getDeviceName());
+      _log('🔗 اعتماد رمز الفريق من الجهاز الآخر: ' + remoteTeamId);
+    } else if (mine !== remoteTeamId) {
+      _log('⚠️ الجهازان لهما رمزا فريق مختلفان (' + mine + ' / ' + remoteTeamId + ') — الاتصال المباشر بينهما يعمل رغم ذلك، لكن لن يتوحّد الفريقان تلقائياً');
+    }
+  }
+
   // الجهاز (أ): يولّد "رمز الدعوة"
   async function localCreateInvite() {
     if (pendingLocalPC) { _log('ℹ️ استبدال محاولة اتصال محلي سابقة لم تكتمل بمحاولة جديدة'); try { pendingLocalPC.close(); } catch (e) {} pendingLocalPC = null; }
+    // نضمن وجود رمز فريق فعلي قبل بناء الدعوة (نولّد واحداً إن لم يوجد) حتى
+    // يتبناه الجهاز الآخر بدل أن يولّد كل جهاز رمزاً عشوائياً مختلفاً بمفرده
+    let teamId = getTeamId();
+    if (!teamId) { teamId = _genTeamId(); createOrSetTeam(teamId, getDeviceName()); _log('🆕 أُنشئ رمز فريق جديد لهذا الاتصال المحلي: ' + teamId); }
     _log('📝 إنشاء رمز دعوة جديد...');
     const pc = new RTCPeerConnection({ iceServers: _getIceServers(), iceCandidatePoolSize: 6 });
     _watchLocalPcState(pc);
@@ -823,7 +900,7 @@ const DakaniOnlineSync = (() => {
     await _waitIceComplete(pc);
     pendingLocalPC = pc;
     _log('✅ رمز الدعوة جاهز — شاركه مع الجهاز الآخر');
-    return _encodeCode({ sdp: pc.localDescription, from: _deviceId(), name: getDeviceName() });
+    return _encodeCode({ sdp: pc.localDescription, from: _deviceId(), name: getDeviceName(), teamId });
   }
 
   // الجهاز (أ): يُدخل "رمز الرد" القادم من الجهاز (ب) لإتمام الاتصال
@@ -833,6 +910,7 @@ const DakaniOnlineSync = (() => {
     if (!obj || !obj.sdp) { _toast('⚠️ الرمز غير صحيح — تأكد من نسخه كاملاً', 'error'); return false; }
     try {
       _log('🔗 تطبيق رمز الرد...');
+      _reconcileTeamId(obj.teamId);
       await pendingLocalPC.setRemoteDescription(obj.sdp);
       pendingLocalPC = null;
       return true;
@@ -844,6 +922,7 @@ const DakaniOnlineSync = (() => {
     const obj = _decodeCode(inviteCode);
     if (!obj || !obj.sdp) { _toast('⚠️ الرمز غير صحيح — تأكد من نسخه كاملاً', 'error'); return null; }
     _log('📝 توليد رمز رد لدعوة من: ' + (obj.name || obj.from));
+    _reconcileTeamId(obj.teamId); // نتبنّى رمز فريق الجهاز الأول إن لم يكن عندي رمز أصلاً
     const pc = new RTCPeerConnection({ iceServers: _getIceServers(), iceCandidatePoolSize: 6 });
     _watchLocalPcState(pc);
     pc.ondatachannel = e => _wireLocalChannel(e.channel);
@@ -852,7 +931,7 @@ const DakaniOnlineSync = (() => {
     await pc.setLocalDescription(answer);
     await _waitIceComplete(pc);
     _log('✅ رمز الرد جاهز — أعده للجهاز الأول');
-    return _encodeCode({ sdp: pc.localDescription, from: _deviceId(), name: getDeviceName() });
+    return _encodeCode({ sdp: pc.localDescription, from: _deviceId(), name: getDeviceName(), teamId: getTeamId() });
   }
 
   function _wireLocalChannel(channel) {
@@ -873,6 +952,11 @@ const DakaniOnlineSync = (() => {
   //  إنشاء/مغادرة الفريق
   // ════════════════════════════════════════════════════════════
   function createOrSetTeam(teamId, deviceName) {
+    const prev = getTeamId();
+    if (prev && prev !== teamId && (isConnected() || internetTimer)) {
+      _log('🔀 تبديل الفريق من ' + prev + ' إلى ' + teamId + ' — إيقاف الاتصال القديم أولاً');
+      _stopEverything();
+    }
     _lsSetStr(LS_TEAMID, teamId);
     _lsSetStr(LS_DEVICENAME, deviceName || _defaultDeviceName());
   }
@@ -1068,20 +1152,20 @@ const DakaniOnlineSync = (() => {
       <div id="os-answer-out-area" style="margin-top:10px;"></div>`;
   }
   async function _submitLocalInvite() {
+    const typedName = document.getElementById('os-devname-input')?.value.trim();
+    if (typedName) _lsSetStr(LS_DEVICENAME, typedName);
     const val = document.getElementById('os-invite-in')?.value;
     const code = await localAcceptInvite(val);
     if (!code) return;
-    const teamId = getTeamId() || ('LOCAL-' + uid());
-    if (!getTeamId()) createOrSetTeam(teamId, document.getElementById('os-devname-input')?.value);
     document.getElementById('os-answer-out-area').innerHTML = `
       <label class="os-hint">3) أرسل رمز الرد هذا للجهاز الأول لإتمام الاتصال</label>
       <div class="os-code-box"><textarea readonly rows="3" id="os-answer-out">${escHtml(code)}</textarea>
         <button class="btn-icon" onclick="DakaniOnlineSync._copyEl('os-answer-out')"><i class="fas fa-copy"></i></button></div>`;
   }
   async function _submitLocalAnswer() {
+    const typedName = document.getElementById('os-devname-input')?.value.trim();
+    if (typedName) _lsSetStr(LS_DEVICENAME, typedName);
     const val = document.getElementById('os-answer-in')?.value;
-    const teamId = getTeamId() || ('LOCAL-' + uid());
-    if (!getTeamId()) createOrSetTeam(teamId, document.getElementById('os-devname-input')?.value);
     const ok = await localAcceptAnswer(val);
     if (ok) { _toast('✅ تم الاتصال المحلي بنجاح', 'success'); renderOnlineSyncPage(); }
   }
