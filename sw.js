@@ -1,4 +1,4 @@
-const CACHE_NAME = 'dakani-pos-v12-p2p-sync';
+const CACHE_NAME = 'dakani-pos-v13-pwa-fix';
 
 const ASSETS = [
     './',
@@ -23,6 +23,9 @@ const ASSETS = [
     './online-sync.js',
     './icon-192.png',
     './icon-512.png',
+    './icon-maskable-192.png',
+    './icon-maskable-512.png',
+    './manifest.json',
     'https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700;900&family=Inter:wght@300;400;600;700&display=swap',
     'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css',
     'https://cdn.jsdelivr.net/npm/chart.js',
@@ -38,8 +41,15 @@ self.addEventListener('install', event => {
     self.skipWaiting();
 
     event.waitUntil(
-        caches.open(CACHE_NAME)
-            .then(cache => cache.addAll(ASSETS))
+        caches.open(CACHE_NAME).then(cache =>
+            // تخزين كل ملف على حدة: فشل ملف واحد (أو CDN) لا يُفشل تثبيت الـ Service Worker
+            Promise.all(ASSETS.map(url => {
+                const req = url.startsWith('http')
+                    ? new Request(url, { mode: 'no-cors' })
+                    : url;
+                return cache.add(req).catch(err => console.warn('SW skip:', url, err));
+            }))
+        )
     );
 });
 
@@ -76,8 +86,10 @@ self.addEventListener('fetch', event => {
 
                 return response;
             })
-            .catch(() => {
-                return caches.match(event.request);
-            })
+            .catch(() =>
+                caches.match(event.request).then(r => r || (event.request.mode === 'navigate'
+                    ? caches.match('./index.html')
+                    : Response.error()))
+            )
     );
 });
