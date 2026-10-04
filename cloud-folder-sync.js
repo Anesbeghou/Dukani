@@ -160,7 +160,7 @@ const DakaniCloudSync = (() => {
             _meta: {
               version: '1.0',
               createdAt: new Date().toISOString(),
-              appName: 'Dakani POS',
+              appName: 'Dukani POS',
               device: navigator.platform || 'unknown'
             },
             _cashbox: _collectLSKeys(CASHBOX_LS_KEYS),
@@ -387,7 +387,7 @@ const DakaniCloudSync = (() => {
       const text = await file.text();
       let snapshot;
       try { snapshot = JSON.parse(text); } catch { throw new Error('محتوى الملف غير صالح'); }
-      if (!snapshot._meta || snapshot._meta.appName !== 'Dakani POS') {
+      if (!snapshot._meta || !['Dukani POS','Dakani POS'].includes(snapshot._meta.appName)) {
         throw new Error('هذا الملف ليس نسخة احتياطية لدكاني');
       }
 
