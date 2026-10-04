@@ -332,7 +332,7 @@
 
     wrap.innerHTML = `
       <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-        <span><i class="fas fa-brain"></i> <span data-i18n="دكاني الذكي / Dakani AI">دكاني الذكي / Dakani AI</span></span>
+        <span><i class="fas fa-brain"></i> <span data-i18n="دكاني الذكي / Dukani AI">دكاني الذكي / Dukani AI</span></span>
         <button class="btn-secondary" style="padding:6px 12px;font-size:12px" onclick="DakaniAI.goToFullInsights()">
           <span data-i18n="عرض التفاصيل الكاملة / View full insights">عرض التفاصيل الكاملة / View full insights</span> <i class="fas fa-arrow-left"></i>
         </button>
@@ -372,7 +372,7 @@
 
     wrap.innerHTML = `
       <div class="card-title">
-        <i class="fas fa-brain"></i> <span data-i18n="دكاني الذكي — تحليلات وتوقعات / Dakani AI — Insights &amp; Forecasts">دكاني الذكي — تحليلات وتوقعات / Dakani AI — Insights &amp; Forecasts</span>
+        <i class="fas fa-brain"></i> <span data-i18n="دكاني الذكي — تحليلات وتوقعات / Dukani AI — Insights &amp; Forecasts">دكاني الذكي — تحليلات وتوقعات / Dukani AI — Insights &amp; Forecasts</span>
         <small style="display:block;margin-top:4px;color:var(--text3);font-weight:400" data-i18n="توصيات تلقائية مبنية على بيانات مبيعاتك الفعلية، محسوبة بالكامل داخل الجهاز / Automatic recommendations based on your real sales data, computed fully on-device">توصيات تلقائية مبنية على بيانات مبيعاتك الفعلية، محسوبة بالكامل داخل الجهاز / Automatic recommendations based on your real sales data, computed fully on-device</small>
       </div>
 
