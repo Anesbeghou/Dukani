@@ -1,4 +1,4 @@
-const CACHE_NAME = 'dakani-pos-v13-pwa-fix';
+const CACHE_NAME = 'dukani-pos-v14';
 
 const ASSETS = [
     './',
