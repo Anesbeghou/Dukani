@@ -118,7 +118,7 @@ const DakaniOnlineSync = (() => {
     const line = new Date().toLocaleTimeString('ar-DZ', { hour12: false }) + ' — ' + msg;
     DEBUG_LOG.push(line);
     if (DEBUG_LOG.length > 80) DEBUG_LOG.shift();
-    try { console.log('[Dakani P2P]', msg); } catch (e) {}
+    try { console.log('[Dukani P2P]', msg); } catch (e) {}
     _renderIfVisible();
   }
 
