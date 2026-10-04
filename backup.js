@@ -150,7 +150,7 @@ const DakaniBackup = (() => {
             _meta: {
               version: '1.0',
               createdAt: new Date().toISOString(),
-              appName: 'Dakani POS',
+              appName: 'Dukani POS',
               device: navigator.platform || 'unknown'
             },
             // بيانات المصاريف والصندوق (مستقلة عن IndexedDB — انظر الشرح أعلاه)
@@ -223,7 +223,7 @@ const DakaniBackup = (() => {
     const a    = document.createElement('a');
     const date = new Date().toISOString().slice(0, 10);
     a.href     = url;
-    a.download = `dakani-backup-${date}.json`;
+    a.download = `dukani-backup-${date}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -445,7 +445,7 @@ const DakaniBackup = (() => {
       try { snapshot = JSON.parse(text); }
       catch { showToast('❌ الملف غير صالح', 'error'); return; }
 
-      if (!snapshot._meta || snapshot._meta.appName !== 'Dakani POS') {
+      if (!snapshot._meta || !['Dukani POS','Dakani POS'].includes(snapshot._meta.appName)) {
         showToast('❌ هذا الملف ليس نسخة احتياطية لدكاني', 'error');
         return;
       }
