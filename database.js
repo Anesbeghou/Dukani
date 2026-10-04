@@ -1108,7 +1108,7 @@ const DB = (() => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `dakani-backup-${today()}.json`;
+    a.download = `dukani-backup-${today()}.json`;
     a.click();
     if (typeof toast === 'function') toast('تم تصدير البيانات بنجاح / Data exported!', 'success');
   }
@@ -1123,7 +1123,7 @@ const DB = (() => {
           'purchases','suppliers','debt_payments','supplier_payments','stock_adjustments','returns','settings','cashbox'];
         const hasData = knownKeys.some(k => data && data[k] !== undefined);
         if (!hasData) {
-          if (typeof toast === 'function') toast('هذا الملف ليس نسخة بيانات دكاني صالحة / Not a valid Dakani backup file', 'error');
+          if (typeof toast === 'function') toast('هذا الملف ليس نسخة بيانات دكاني صالحة / Not a valid Dukani backup file', 'error');
           return;
         }
         if (data.products)   write('products', data.products);
