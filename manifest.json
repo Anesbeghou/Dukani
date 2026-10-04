@@ -1,7 +1,7 @@
 {
   "id": "./index.html",
   "short_name": "دكاني",
-  "name": "دكاني | Dakani – نظام إدارة المحل",
+  "name": "دكاني | Dukani – نظام إدارة المحل",
   "description": "نظام إدارة المحل ونقطة البيع يعمل دون اتصال",
   "icons": [
     { "src": "./icon-192.png", "type": "image/png", "sizes": "192x192", "purpose": "any" },
