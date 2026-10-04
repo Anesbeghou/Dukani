@@ -220,7 +220,7 @@ const DakaniLicense = (() => {
           <i class="fas fa-store"></i>
           <div>
             <span class="lic-brand-ar">دكاني</span>
-            <span class="lic-brand-en">Dakani POS</span>
+            <span class="lic-brand-en">Dukani POS</span>
           </div>
         </div>
         <div class="lic-icon-wrap">
