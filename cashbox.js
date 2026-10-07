@@ -204,6 +204,7 @@ const DakaniCashbox = (() => {
       list[i].difference = actual - expected;
       list[i].closeNote = (note || '').trim();
       list[i].status = 'closed';
+      list[i].updatedAt = now(); // لتنتقل حالة "مغلقة" للأجهزة الأخرى عبر المزامنة
       _set(KEYS.shifts, list);
       return list[i];
     }
