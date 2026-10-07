@@ -35,6 +35,8 @@ const DakaniBackup = (() => {
   // mode: 'replace' يستبدل بيانات الصندوق الحالية بالكامل، 'merge' يُبقي
   // كل شيء موجود ويضيف فقط السجلات الجديدة (بنفس منطق دمج بقية الجداول)
   function _restoreCashboxData(cbxData, mode) {
+    window.__dkNoTomb = true; // الاستعادة لا تُعدّ حذفاً (لا تُنقل لبقية الفريق)
+    try {
     if (!cbxData) return;
     CASHBOX_LS_KEYS.forEach(k => {
       const incoming = Array.isArray(cbxData[k]) ? cbxData[k] : [];
@@ -48,6 +50,7 @@ const DakaniBackup = (() => {
         try { localStorage.setItem(k, JSON.stringify(incoming)); } catch (e) {}
       }
     });
+      } finally { window.__dkNoTomb = false; }
   }
 
   // ─── بيانات المدراء والموظفين (localStorage مستقل - accounts.js) ──────────
@@ -69,6 +72,8 @@ const DakaniBackup = (() => {
   // ملاحظة: dakani_revoked_manager_keys مصفوفة نصوص (مفاتيح) وليست كائنات
   // بها id، لذا يُستخدم النص نفسه كمعرّف فريد عند الدمج.
   function _restoreAccountsData(accData, mode) {
+    window.__dkNoTomb = true; // الاستعادة لا تُعدّ حذفاً (لا تُنقل لبقية الفريق)
+    try {
     if (!accData) return;
     ACCOUNTS_LS_KEYS.forEach(k => {
       const incoming = Array.isArray(accData[k]) ? accData[k] : [];
@@ -85,6 +90,7 @@ const DakaniBackup = (() => {
         try { localStorage.setItem(k, JSON.stringify(incoming)); } catch (e) {}
       }
     });
+      } finally { window.__dkNoTomb = false; }
   }
 
   // ─── استخراج كل البيانات من IndexedDB عبر DB ──────────────
