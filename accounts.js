@@ -170,7 +170,7 @@ const DakaniAccounts = (() => {
   function renameManager(id, name) {
     const list = getManagers();
     const m = list.find(x => x.id === id);
-    if (m) { m.name = name; saveManagers(list); }
+    if (m) { m.name = name; m.updatedAt = now(); saveManagers(list); }
   }
 
   function deleteManager(id) {
@@ -221,7 +221,8 @@ const DakaniAccounts = (() => {
       hireDate: data.hireDate || emp.hireDate,
       address: (data.address || '').trim(),
       notes: (data.notes || '').trim(),
-      active: data.active !== false
+      active: data.active !== false,
+      updatedAt: now()
     });
     saveEmployees(list);
     return emp;
