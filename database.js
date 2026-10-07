@@ -24,7 +24,8 @@ const DB = (() => {
     stock_adjustments: [],
     returns: [],
     held_sales: [],
-    undo_log: []
+    undo_log: [],
+    tombstones: {}   // شواهد الحذف: {جدول: {معرّف: وقت الحذف}} — لنقل الحذف للأجهزة الأخرى
   };
 
   // ─── IndexedDB Core ─────────────────────────────────────────────────────────
@@ -77,7 +78,108 @@ const DB = (() => {
 
   // ─── Core Helpers ───────────────────────────────────────────────────────────
   const read  = key => cache[key];
+  // ─── تتبّع التغييرات لأجل المزامنة (ختم زمني تلقائي) ───────────────────────
+  // أي تعديل على منتج/زبون/مورد (دين، رصيد، مخزون...) يُختم تلقائياً بـ updatedAt
+  // حتى تعرف المزامنة أن السجل تغيّر وأيّ نسخة هي الأحدث. نفس الشيء للإعدادات
+  // لكن لكل مفتاح على حدة (_ts) حتى لا تطغى إعدادات جهاز على إعدادات آخر.
+  const SYNC_MUTABLE = ['products', 'customers', 'suppliers'];
+  const _sigs = {};            // table -> Map(id -> بصمة المحتوى)
+  let _settingsSig = {};       // مفتاح الإعداد -> قيمته JSON
+  let _tracking = false;       // لا نختم شيئاً قبل اكتمال الإقلاع (حتى لا تُختم القيم الافتراضية)
+  let _remoteApply = false;    // أثناء دمج بيانات قادمة من جهاز آخر نحافظ على ختمها الأصلي
+
+  function _sigOf(it) {
+    const o = Object.assign({}, it);
+    delete o.image; delete o.updatedAt;
+    return JSON.stringify(o);
+  }
+  function _settingsSnapshot(s) {
+    const o = {};
+    for (const k in (s || {})) { if (k !== '_ts') o[k] = JSON.stringify(s[k]); }
+    return o;
+  }
+  function _trackChanges(key, val) {
+    if (!_tracking) return;
+    try {
+      if (SYNC_MUTABLE.includes(key) && Array.isArray(val)) {
+        const prev = _sigs[key], next = new Map(), t = now();
+        for (const it of val) {
+          if (!it || it.id === undefined) continue;
+          const sg = _sigOf(it);
+          next.set(it.id, sg);
+          if (!_remoteApply && prev && prev.get(it.id) !== sg) it.updatedAt = t;
+        }
+        _sigs[key] = next;
+      } else if (key === 'settings' && val && typeof val === 'object') {
+        const snap = _settingsSnapshot(val);
+        if (!_remoteApply) {
+          const prevTs = (cache.settings && cache.settings._ts) || {};
+          const ts = Object.assign({}, prevTs, val._ts || {});
+          const t = now();
+          for (const k in snap) { if (_settingsSig[k] !== snap[k]) ts[k] = t; }
+          val._ts = ts;
+        }
+        _settingsSig = snap;
+      }
+    } catch (e) { /* التتبّع لا يجب أن يمنع الحفظ أبداً */ }
+  }
+
+  // ─── تتبّع الحذف (شواهد حذف) ──────────────────────────────────────────────
+  // عند اختفاء سجل من أي جدول متزامن نسجّل "شاهد حذف" بوقته، فيُرسَل لبقية الأجهزة
+  // وتحذف السجل عندها أيضاً. لا نسجّل شيئاً أثناء: الإقلاع، دمج بيانات قادمة من جهاز
+  // آخر، استيراد نسخة احتياطية. وإن عاد سجل محذوف (استعادة) نُلغي الشاهد ونختمه بالأحدث.
+  const SYNC_TABLES_ALL = ['products', 'categories', 'customers', 'sales', 'sale_items',
+    'purchases', 'suppliers', 'debt_payments', 'supplier_payments',
+    'stock_adjustments', 'returns', 'held_sales'];
+  const BULK_CLEAR_OK = ['held_sales', 'stock_adjustments']; // جداول يُسمح فيها بمسح جماعي مقصود
+  const TOMB_MAX_AGE_DAYS = 120;
+  const _idMaps = {};          // table -> Map(id -> اسم التصنيف أو '')
+  let _noTomb = false;         // أثناء الاستيراد لا نسجّل حذفاً
+
+  function _trackDeletes(key, val) {
+    if (!_tracking || !SYNC_TABLES_ALL.includes(key) || !Array.isArray(val)) return;
+    try {
+      const prev = _idMaps[key];
+      const next = new Map();
+      for (const it of val) {
+        if (it && it.id !== undefined) next.set(it.id, key === 'categories' ? (it.name || '') : '');
+      }
+      if (prev && !_remoteApply) {
+        const store = cache.tombstones || (cache.tombstones = {});
+        const tm = store[key] || (store[key] = {});
+        const t = now();
+        let touched = false;
+        const removed = [];
+        prev.forEach((label, id) => { if (!next.has(id)) removed.push([id, label]); });
+        // حماية: مسح جماعي ضخم غير معتاد (خلل محتمل) لا يتحوّل لحذف يعمّ كل الفريق
+        const suspicious = removed.length > 50 && removed.length > prev.size * 0.5 && !BULK_CLEAR_OK.includes(key);
+        if (!_noTomb && !suspicious) {
+          removed.forEach(([id, label]) => {
+            tm[String(id)] = t;
+            if (key === 'categories' && label) tm['name:' + label] = t;
+            touched = true;
+          });
+        }
+        // سجل عاد للظهور بعد حذفه → نلغي الشاهد ونختم السجل بوقت جديد ليقبله الآخرون
+        if (Object.keys(tm).length) {
+          for (const it of val) {
+            if (!it || it.id === undefined || prev.has(it.id)) continue;
+            const k1 = String(it.id), k2 = key === 'categories' ? 'name:' + (it.name || '') : null;
+            if (tm[k1] || (k2 && tm[k2])) {
+              delete tm[k1]; if (k2) delete tm[k2];
+              it.updatedAt = t; touched = true;
+            }
+          }
+        }
+        if (touched) idb.set(PREFIX + 'tombstones', store);
+      }
+      _idMaps[key] = next;
+    } catch (e) { /* لا نمنع الحفظ أبداً */ }
+  }
+
   const write = (key, val) => {
+    _trackChanges(key, val);
+    _trackDeletes(key, val);
     cache[key] = val; // تحديث الذاكرة فوراً للواجهة
     idb.set(PREFIX + key, val); // الحفظ في IndexedDB في الخلفية
   };
@@ -121,6 +223,7 @@ const DB = (() => {
     }
 
     seed(); // تهيئة القيم الافتراضية إذا كانت فارغة
+    _initSyncTracking();
     
     isReady = true;
     document.addEventListener = originalAddEventListener;
@@ -144,6 +247,7 @@ const DB = (() => {
       if (val !== undefined) cache[k] = val;
     }
     seed();
+    _initSyncTracking();
     isReady = true;
     document.addEventListener = originalAddEventListener;
 
@@ -612,8 +716,8 @@ const DB = (() => {
       sales.push(sale); write('sales', sales);
 
       // store items flat too for fast querying
-      saleData.items.forEach(it => {
-        items.push({ ...it, saleId: sale.id, date: sale.date });
+      saleData.items.forEach((it, idx) => {
+        items.push({ ...it, id: sale.id + '#' + idx, saleId: sale.id, date: sale.date });
         Products.adjustStock(it.productId, -it.qty, it.variantId);
       });
       write('sale_items', items);
@@ -1126,6 +1230,7 @@ const DB = (() => {
           if (typeof toast === 'function') toast('هذا الملف ليس نسخة بيانات دكاني صالحة / Not a valid Dukani backup file', 'error');
           return;
         }
+        _noTomb = true; window.__dkNoTomb = true; // الاستعادة لا تُعدّ حذفاً
         if (data.products)   write('products', data.products);
         if (data.categories) write('categories', data.categories);
         if (data.customers)  write('customers', data.customers);
@@ -1140,6 +1245,7 @@ const DB = (() => {
         if (data.held_sales)         write('held_sales',         data.held_sales);
         if (data.settings)      write('settings',      data.settings);
         if (data.cashbox)       _writeCashboxLocalStorage(data.cashbox);
+        _noTomb = false; window.__dkNoTomb = false;
         if (typeof toast === 'function') toast('تم الاستيراد بنجاح! جارٍ إعادة التحميل... / Import success!', 'success');
         setTimeout(() => location.reload(), 1500);
       } catch { if (typeof toast === 'function') toast('ملف غير صالح / Invalid file', 'error'); }
@@ -1200,7 +1306,222 @@ const DB = (() => {
     }
   };
 
-  return { Settings, Categories, Products, Suppliers, Customers,
+
+  // ─── SYNC API (مزامنة الفريق عبر online-sync.js) ───────────────────────────
+  // كل الدمج يتم عبر ذاكرة التطبيق نفسها (cache) ثم write() — فلا يتجاوز أحد
+  // الآخر، وتظهر البيانات المستلمة فوراً في الواجهة دون إعادة تحميل.
+  const SYNC_TABLES = ['products', 'categories', 'customers', 'sales', 'sale_items',
+    'purchases', 'suppliers', 'debt_payments', 'supplier_payments',
+    'stock_adjustments', 'returns', 'held_sales'];
+  const SETTINGS_BASELINE_TS = '2000-01-01T00:00:00.000Z';
+  const SETTINGS_DEFAULTS = {
+    storeName: 'دكاني', address: '', phone: '', currency: 'دج', lowStockThreshold: 5,
+    expiryWarningDays: 15, logo: '', thankYouMessage: 'شكراً لتعاملكم معنا 🙏', language: 'ar',
+    alertLowStock: true, alertExpired: true, alertExpiringSoon: true,
+    alertCustomerDebt: true, alertSupplierDebt: true,
+    custTierSilver: 5000, custTierGold: 20000, custTierVip: 50000
+  };
+
+  // يُستدعى مرة واحدة بعد الإقلاع: يلتقط بصمات الوضع الحالي ويبدأ ختم أي تعديل لاحق
+  function _initSyncTracking() {
+    try {
+      SYNC_MUTABLE.forEach(t => {
+        const m = new Map();
+        (cache[t] || []).forEach(it => { if (it && it.id !== undefined) m.set(it.id, _sigOf(it)); });
+        _sigs[t] = m;
+      });
+      const s = cache.settings || (cache.settings = {});
+      if (!s._ts) s._ts = {};
+      // الإعدادات التي عدّلها التاجر سابقاً (قبل هذا التحديث) تُعتبر "أقدم من أي تعديل جديد
+      // لكن أحدث من القيمة الافتراضية" حتى تنتقل لجهاز جديد بدل أن تطغى عليها قيمه الافتراضية
+      for (const k in s) {
+        if (k === '_ts' || s._ts[k]) continue;
+        if (JSON.stringify(s[k]) !== JSON.stringify(SETTINGS_DEFAULTS[k])) s._ts[k] = SETTINGS_BASELINE_TS;
+      }
+      _settingsSig = _settingsSnapshot(s);
+      SYNC_TABLES_ALL.forEach(t => {
+        const m = new Map();
+        (cache[t] || []).forEach(it => { if (it && it.id !== undefined) m.set(it.id, t === 'categories' ? (it.name || '') : ''); });
+        _idMaps[t] = m;
+      });
+      // بنود الفواتير القديمة كانت بلا معرّف (id) فلم تكن تُنقل بين الأجهزة إطلاقاً.
+      // نعطيها معرّفاً ثابتاً (معرّف الفاتورة + ترتيب البند) — نفس صيغة البنود الجديدة.
+      // يتم قبل التقاط خرائط المعرّفات حتى لا يُعدّ هذا التعديل حذفاً أو تغييراً.
+      const siList = cache.sale_items || [];
+      const siPos = {};
+      let siFixed = false;
+      for (const it of siList) {
+        if (!it || !it.saleId) continue;
+        const k = siPos[it.saleId] || 0;
+        siPos[it.saleId] = k + 1;
+        if (it.id === undefined) { it.id = it.saleId + '#' + k; siFixed = true; }
+      }
+      if (siFixed) {
+        idb.set(PREFIX + 'sale_items', siList);
+        const m2 = new Map();
+        siList.forEach(it => { if (it && it.id !== undefined) m2.set(it.id, ''); });
+        _idMaps['sale_items'] = m2;
+      }
+      // تنظيف شواهد الحذف القديمة جداً حتى لا تتراكم للأبد
+      const store = cache.tombstones || (cache.tombstones = {});
+      const cutoff = new Date(Date.now() - TOMB_MAX_AGE_DAYS * 864e5).toISOString();
+      let pruned = false;
+      for (const t in store) for (const k in store[t]) { if (store[t][k] < cutoff) { delete store[t][k]; pruned = true; } }
+      if (pruned) idb.set(PREFIX + 'tombstones', store);
+      _tracking = true;
+    } catch (e) { _tracking = false; }
+  }
+
+  const _tsOf = it => (it && (it.updatedAt || it.createdAt || it.date)) || '';
+  function _plain(it) { const o = Object.assign({}, it); delete o.image; return JSON.stringify(o); }
+  // هل النسخة القادمة أحدث من المحلية؟ عند تساوي الختم نختار نسخة محدّدة بشكل ثابت
+  // (نفس الاختيار على كل الأجهزة) حتى تتطابق الأجهزة ولا تتبادل التحديثات للأبد
+  function _incomingWins(loc, inc) {
+    const lt = _tsOf(loc), it = _tsOf(inc);
+    if (it > lt) return true;
+    if (it < lt) return false;
+    const a = _plain(inc), b = _plain(loc);
+    return a !== b && a > b;
+  }
+
+  // ─── شواهد الحذف: قراءة/دمج ─────────────────────────────────────────────
+  function _tombAt(table, it) {
+    const tm = (cache.tombstones || {})[table];
+    if (!tm) return '';
+    const a = tm[String(it.id)] || '';
+    const b = table === 'categories' ? (tm['name:' + (it.name || '')] || '') : '';
+    return a > b ? a : b;
+  }
+  function _clearTomb(table, it) {
+    const tm = (cache.tombstones || {})[table];
+    if (!tm) return;
+    delete tm[String(it.id)];
+    if (table === 'categories') delete tm['name:' + (it.name || '')];
+  }
+  function _persistTombs() { idb.set(PREFIX + 'tombstones', cache.tombstones || {}); }
+
+  function tombstones() {
+    const out = [], store = cache.tombstones || {};
+    for (const t in store) for (const id in store[t]) out.push({ t, id, at: store[t][id] });
+    return out;
+  }
+
+  // تطبيق حذف قادم من جهاز آخر: نحذف السجل المحلي إن لم يُعدَّل بعد وقت الحذف
+  function mergeTombstones(list) {
+    if (!Array.isArray(list) || !list.length) return false;
+    const store = cache.tombstones || (cache.tombstones = {});
+    const byTable = {};
+    for (const x of list) {
+      if (!x || !x.t || x.id === undefined || !x.at || !SYNC_TABLES.includes(x.t)) continue;
+      (byTable[x.t] = byTable[x.t] || []).push(x);
+    }
+    let changed = false, tombTouched = false;
+    for (const t in byTable) {
+      const tm = store[t] || (store[t] = {});
+      for (const x of byTable[t]) {
+        const k = String(x.id);
+        if (!tm[k] || tm[k] < x.at) { tm[k] = x.at; tombTouched = true; }
+      }
+      const table = read(t);
+      if (!Array.isArray(table)) continue;
+      const keep = [];
+      let removedAny = false;
+      for (const it of table) {
+        if (it && it.id !== undefined) {
+          const at = _tombAt(t, it);
+          if (at && _tsOf(it) <= at) { removedAny = true; continue; }
+        }
+        keep.push(it);
+      }
+      if (removedAny) {
+        _remoteApply = true;
+        try { write(t, keep); } finally { _remoteApply = false; }
+        changed = true;
+      }
+    }
+    if (tombTouched) _persistTombs();
+    return changed;
+  }
+
+  function mergeRecords(table, items) {
+    if (!SYNC_TABLES.includes(table) || !Array.isArray(items) || !items.length) return false;
+    const list = read(table);
+    if (!Array.isArray(list)) return false;
+    const idx = new Map();
+    list.forEach((x, i) => { if (x && x.id !== undefined) idx.set(x.id, i); });
+    const names = table === 'categories' ? new Set(list.map(c => c && c.name)) : null;
+    let changed = false, tombTouched = false;
+    for (const inc of items) {
+      if (!inc || inc.id === undefined) continue;
+      // سجل محذوف عندنا: لا يعود إلا إن عُدّل بعد وقت الحذف
+      const tat = _tombAt(table, inc);
+      if (tat) {
+        if (_tsOf(inc) <= tat) continue;
+        _clearTomb(table, inc); tombTouched = true;
+      }
+      const i = idx.get(inc.id);
+      if (i === undefined) {
+        // التصنيفات الافتراضية لها معرّفات عشوائية على كل جهاز، والمنتجات تشير للتصنيف
+        // بالاسم — لذلك لا نُضيف تصنيفاً بنفس الاسم مرة ثانية (يمنع التكرار)
+        if (names && names.has(inc.name)) continue;
+        idx.set(inc.id, list.length);
+        list.push(inc);
+        if (names) names.add(inc.name);
+        changed = true;
+        continue;
+      }
+      const loc = list[i];
+      if (_incomingWins(loc, inc)) {
+        // الصور لا تُنقل بين الأجهزة — نُبقي صورة هذا الجهاز كما هي ولا نمسحها
+        list[i] = (table === 'products' && loc.image && !inc.image) ? Object.assign({}, inc, { image: loc.image }) : inc;
+        changed = true;
+      }
+    }
+    if (changed) {
+      _remoteApply = true;
+      try { write(table, list); } finally { _remoteApply = false; }
+    }
+    if (tombTouched) _persistTombs();
+    return changed;
+  }
+
+  // دمج الإعدادات لكل مفتاح على حدة: الأحدث يفوز (بدل أن يفوز المحلي دائماً)
+  function mergeSettings(remote) {
+    if (!remote || typeof remote !== 'object') return false;
+    const local = read('settings') || {};
+    const lts = Object.assign({}, local._ts || {});
+    const rts = remote._ts || {};
+    const next = Object.assign({}, local);
+    let changed = false;
+    for (const k in remote) {
+      if (k === '_ts') continue;
+      const rv = JSON.stringify(remote[k]);
+      const has = Object.prototype.hasOwnProperty.call(local, k);
+      let take = false;
+      const a = rts[k] || '', b = lts[k] || '';
+      if (!has) take = true;
+      else if (rv !== JSON.stringify(local[k])) {
+        if (a > b) take = true;
+        else if (a === b && a !== '') take = rv > JSON.stringify(local[k]);
+      }
+      if (take) { next[k] = remote[k]; if (a) lts[k] = a; changed = true; }
+    }
+    if (changed) {
+      next._ts = lts;
+      _remoteApply = true;
+      try { write('settings', next); } finally { _remoteApply = false; }
+    }
+    return changed;
+  }
+
+  const Sync = {
+    TABLES: SYNC_TABLES,
+    table: t => read(t) || [],
+    settings: () => read('settings') || {},
+    mergeRecords, mergeSettings, mergeTombstones, tombstones
+  };
+
+  return { Settings, Categories, Products, Suppliers, Customers, Sync,
            DebtPayments, SupplierPayments, Sales, Purchases, StockAdjustments, Returns, HeldSales,
            UndoManager,
            exportData, importData, resetAll, stats, uid, today, now };
