@@ -132,6 +132,102 @@ const DakaniOnlineSync = (() => {
   function _lsSetStr(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
   function _lsDel(key) { try { localStorage.removeItem(key); } catch (e) {} }
 
+  // ─── شواهد حذف قوائم localStorage (الصندوق، المناوبات، الموظفون، المدراء) ──────
+  // هذه القوائم تُحفظ مباشرة في localStorage من وحدات أخرى، فنراقب الكتابة عليها:
+  // أي عنصر يختفي من القائمة يُسجَّل له شاهد حذف بوقته ليُنقل لبقية الأجهزة.
+  // لا نسجّل شيئاً أثناء الدمج الداخلي أو استعادة نسخة احتياطية (window.__dkNoTomb).
+  const LS_TOMBS = 'dakani_onlinesync_lstombs_v1';
+  const LS_TOMB_MAX_AGE_DAYS = 120;
+  let _lsInternal = false;
+  function _lsTombs() { return _lsGet(LS_TOMBS, {}); }
+  function _lsTombsSave(o) { _lsSet(LS_TOMBS, o); }
+  function _installLsDeleteTracking() {
+    try {
+      const proto = Storage.prototype;
+      if (proto.__dkDelTrack) return;
+      const origSet = proto.setItem, origGet = proto.getItem;
+      const watch = {};
+      Object.keys(SINGLE_KEYS_LS).forEach(n => { watch[SINGLE_KEYS_LS[n]] = n; });
+      proto.setItem = function (key, value) {
+        try {
+          const name = watch[key];
+          if (name && this === window.localStorage && !_lsInternal && !window.__dkNoTomb) {
+            const prevArr = JSON.parse(origGet.call(this, key) || '[]');
+            const nextArr = JSON.parse(value || '[]');
+            if (Array.isArray(prevArr) && Array.isArray(nextArr)) {
+              const idsOf = arr => new Set(arr.filter(x => x && typeof x === 'object' && x.id !== undefined).map(x => String(x.id)));
+              const prevIds = idsOf(prevArr), nextIds = idsOf(nextArr);
+              const tombs = JSON.parse(origGet.call(this, LS_TOMBS) || '{}');
+              const tm = tombs[name] || (tombs[name] = {});
+              const t = new Date().toISOString();
+              let touched = false;
+              prevIds.forEach(id => { if (!nextIds.has(id)) { tm[id] = t; touched = true; } });
+              nextIds.forEach(id => { if (!prevIds.has(id) && tm[id]) { delete tm[id]; touched = true; } });
+              if (touched) origSet.call(this, LS_TOMBS, JSON.stringify(tombs));
+            }
+          }
+        } catch (e) { /* التتبّع لا يمنع الحفظ أبداً */ }
+        return origSet.apply(this, arguments);
+      };
+      proto.__dkDelTrack = true;
+      // تنظيف الشواهد القديمة جداً
+      const all = JSON.parse(origGet.call(localStorage, LS_TOMBS) || '{}');
+      const cutoff = new Date(Date.now() - LS_TOMB_MAX_AGE_DAYS * 864e5).toISOString();
+      let pruned = false;
+      for (const n in all) for (const id in all[n]) { if (all[n][id] < cutoff) { delete all[n][id]; pruned = true; } }
+      if (pruned) origSet.call(localStorage, LS_TOMBS, JSON.stringify(all));
+    } catch (e) {}
+  }
+  _installLsDeleteTracking();
+
+  // تطبيق حذف قادم من جهاز آخر على قوائم localStorage
+  function _applyLsTombs(list) {
+    let changed = false, touched = false;
+    const all = _lsTombs();
+    const byName = {};
+    for (const x of list) {
+      const name = String(x.t).slice(3);
+      if (!SINGLE_KEYS_LS[name]) continue;
+      (byName[name] = byName[name] || []).push(x);
+    }
+    for (const name in byName) {
+      const tm = all[name] || (all[name] = {});
+      for (const x of byName[name]) {
+        const k = String(x.id);
+        if (!tm[k] || tm[k] < x.at) { tm[k] = x.at; touched = true; }
+      }
+      const lsKey = SINGLE_KEYS_LS[name];
+      let cur = [];
+      try { cur = JSON.parse(localStorage.getItem(lsKey) || '[]'); } catch (e) {}
+      if (!Array.isArray(cur)) continue;
+      const keep = cur.filter(it => {
+        if (it && typeof it === 'object' && it.id !== undefined) {
+          const at = tm[String(it.id)];
+          if (at && _lsTs(it) <= at) return false;
+        }
+        return true;
+      });
+      if (keep.length !== cur.length) {
+        _lsInternal = true;
+        try { localStorage.setItem(lsKey, JSON.stringify(keep)); } finally { _lsInternal = false; }
+        changed = true;
+      }
+    }
+    if (touched) _lsTombsSave(all);
+    return changed;
+  }
+
+  // كل شواهد الحذف (قاعدة البيانات + قوائم localStorage) بصيغة موحّدة {t, id, at}
+  function _collectTombs() {
+    const out = [];
+    try { if (typeof DB !== 'undefined' && DB.Sync) out.push(...DB.Sync.tombstones()); } catch (e) {}
+    try {
+      const all = _lsTombs();
+      for (const name in all) for (const id in all[name]) out.push({ t: 'ls:' + name, id, at: all[name][id] });
+    } catch (e) {}
+    return out;
+  }
+
   function _isManager() {
     try { return typeof DakaniAccounts !== 'undefined' && DakaniAccounts.getRole && DakaniAccounts.getRole() === 'manager'; }
     catch (e) { return false; }
@@ -215,6 +311,14 @@ const DakaniOnlineSync = (() => {
   //  قراءة/دمج البيانات المحلية (IndexedDB) — نفس منطق cloud-folder-sync.js
   // ════════════════════════════════════════════════════════════
   function _readAllFromDB() {
+    // المصدر الصحيح الوحيد هو ذاكرة التطبيق الحيّة (DB.Sync) — لا نقرأ IndexedDB مباشرة
+    // لأن التطبيق يعمل على الذاكرة ويكتب منها، وأي كتابة خارجية كانت تضيع أو لا تظهر
+    if (typeof DB !== 'undefined' && DB.Sync) {
+      const out = {};
+      RECORD_TABLES.forEach(t => { out[t] = DB.Sync.table(t); });
+      out.settings = DB.Sync.settings();
+      return Promise.resolve(out);
+    }
     return new Promise(resolve => {
       try {
         const req = indexedDB.open('DakaniDB', 1);
@@ -333,6 +437,62 @@ const DakaniOnlineSync = (() => {
     });
   }
 
+  // ─── دمج قوائم localStorage (الصندوق، المناوبات، الموظفون، المدراء) ─────────
+  // كان الدمج السابق "إضافة فقط": أي تعديل على عنصر موجود (مثل إغلاق مناوبة أو تعديل
+  // موظف) لا يصل أبداً للأجهزة الأخرى، فتبقى المناوبة "مفتوحة" عندها للأبد.
+  // الآن: لكل عنصر بنفس المعرّف تفوز النسخة الأحدث، والمناوبة المغلقة لا تعود مفتوحة.
+  function _lsTs(it) {
+    return (it && typeof it === 'object') ? (it.updatedAt || it.closedAt || it.createdAt || it.openedAt || it.date || '') : '';
+  }
+  function _lsIncomingWins(loc, inc) {
+    if (loc && inc && loc.status && inc.status && loc.status !== inc.status) {
+      if (inc.status === 'closed') return true;
+      if (loc.status === 'closed') return false;
+    }
+    const lt = _lsTs(loc), it = _lsTs(inc);
+    if (it > lt) return true;
+    if (it < lt) return false;
+    const a = JSON.stringify(inc), b = JSON.stringify(loc);
+    return a !== b && a > b;
+  }
+  function _mergeLSKey(lsKey, incomingArr, name) {
+    try {
+      const allTombs = name ? _lsTombs() : null;
+      const tm = allTombs ? (allTombs[name] || {}) : {};
+      let tombTouched = false;
+      let current = [];
+      try { current = JSON.parse(localStorage.getItem(lsKey) || '[]'); } catch (e) {}
+      if (!Array.isArray(current)) current = [];
+      const idx = new Map();
+      current.forEach((it, i) => { if (it && typeof it === 'object' && it.id !== undefined) idx.set(it.id, i); });
+      let changed = false;
+      for (const inc of (Array.isArray(incomingArr) ? incomingArr : [])) {
+        if (inc && typeof inc === 'object' && inc.id !== undefined) {
+          // عنصر محذوف عندنا: لا يعود إلا إن عُدّل بعد وقت الحذف
+          const tat = tm[String(inc.id)];
+          if (tat) {
+            if (_lsTs(inc) <= tat) continue;
+            delete tm[String(inc.id)]; tombTouched = true;
+          }
+          if (!idx.has(inc.id)) { idx.set(inc.id, current.length); current.push(inc); changed = true; }
+          else {
+            const i = idx.get(inc.id);
+            if (_lsIncomingWins(current[i], inc)) { current[i] = inc; changed = true; }
+          }
+        } else if (inc !== undefined && inc !== null) {
+          const str = JSON.stringify(inc);
+          if (!current.some(c => JSON.stringify(c) === str)) { current.push(inc); changed = true; }
+        }
+      }
+      if (changed) {
+        _lsInternal = true;
+        try { localStorage.setItem(lsKey, JSON.stringify(current)); } finally { _lsInternal = false; }
+      }
+      if (tombTouched && allTombs) { allTombs[name] = tm; _lsTombsSave(allTombs); }
+      return changed;
+    } catch (e) { _lsInternal = false; return false; }
+  }
+
   function _mergeLSKeyAdditive(lsKey, incomingArr) {
     try {
       let current = [];
@@ -347,8 +507,28 @@ const DakaniOnlineSync = (() => {
     } catch (e) { return false; }
   }
 
-  function _sig(item) {
-    return (item && (item.updatedAt || item.createdAt)) ? String(item.updatedAt || item.createdAt) : (JSON.stringify(item).length + '');
+  // بصمة محتوى سريعة (cyrb53) — لا تعتمد على الطول أو الختم الزمني وحدهما
+  function _hash(str) {
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < str.length; i++) {
+      const ch = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+  }
+  // الجداول التي تتغير سجلاتها بعد إنشائها (ديون، مخزون، أرصدة...) تُبصَم بمحتواها كاملاً
+  // (بدون الصورة)، فأي تعديل مهما صغر يُرسَل. الجداول الأخرى (فواتير...) ثابتة بعد إنشائها.
+  const HASHED_TABLES = ['products', 'customers', 'suppliers', 'categories', 'purchases', 'held_sales'];
+  function _sig(item, table) {
+    const ts = (item && (item.updatedAt || item.createdAt)) ? String(item.updatedAt || item.createdAt) : '';
+    if (HASHED_TABLES.includes(table)) {
+      const o = Object.assign({}, item); delete o.image;
+      return ts + '|' + _hash(JSON.stringify(o));
+    }
+    return ts || (JSON.stringify(item).length + '');
   }
 
   // ════════════════════════════════════════════════════════════
@@ -364,7 +544,7 @@ const DakaniOnlineSync = (() => {
       pushedMap[table] = pushedMap[table] || {};
       for (const item of (data[table] || [])) {
         if (!item || item.id === undefined) continue;
-        const sig = _sig(item);
+        const sig = _sig(item, table);
         if (pushedMap[table][item.id] === sig) continue;
         const clean = (table === 'products' && item.image) ? Object.assign({}, item, { image: undefined }) : item;
         records.push({ t: table, id: item.id, data: clean });
@@ -379,12 +559,23 @@ const DakaniOnlineSync = (() => {
     // بصمة خفيفة لمجموعة singles (منفصلة تماماً عن تتبّع السجلات) — بدون هذا
     // كانت تغييرات الصندوق/الموظفين/الإعدادات تُهمَل بالكامل إن لم يتغيّر أي
     // منتج أو فاتورة معها في نفس الدورة، وهي عِلّة حقيقية أصلحناها هنا
-    const singlesStr = JSON.stringify(singles);
-    const singlesSig = singlesStr.length + ':' + singlesStr.slice(-80);
+    // (الشعار الكبير يُختزل لبصمة خفيفة حتى لا نُعيد حساب ميغابايت كل 3 ثوانٍ)
+    const lite = Object.assign({}, singles, { settings: Object.assign({}, singles.settings) });
+    if (typeof lite.settings.logo === 'string' && lite.settings.logo.length > 200) {
+      lite.settings.logo = 'L' + lite.settings.logo.length + ':' + lite.settings.logo.slice(-60);
+    }
+    const singlesSig = _hash(JSON.stringify(lite));
     const singlesChanged = pushedMap.__singlesSig !== singlesSig;
     if (singlesChanged) pushedMap.__singlesSig = singlesSig;
+    // شواهد الحذف: نرسل فقط ما لم يُرسَل بعد (نفس أسلوب تتبّع السجلات)
+    const tombs = [];
+    const tmap = pushedMap.__tomb || (pushedMap.__tomb = {});
+    for (const x of _collectTombs()) {
+      const k = x.t + '|' + x.id;
+      if (tmap[k] !== x.at) { tombs.push(x); tmap[k] = x.at; }
+    }
     _lsSet(LS_PUSHED, pushedMap);
-    return { records, singles: singlesChanged ? singles : null };
+    return { records, singles: singlesChanged ? singles : null, tombs };
   }
 
   // رسالة كاملة (تُرسَل مرة واحدة فقط لكل اتصال جديد، لضمان التقاء البيانات فوراً)
@@ -403,11 +594,21 @@ const DakaniOnlineSync = (() => {
     for (const key in SINGLE_KEYS_LS) {
       try { singles[key] = JSON.parse(localStorage.getItem(SINGLE_KEYS_LS[key]) || '[]'); } catch (e) { singles[key] = []; }
     }
-    return { records, singles };
+    return { records, singles, tombs: _collectTombs() };
   }
 
   async function _applyIncoming(msg) {
     let changed = false;
+    // 1) الحذف أولاً — حتى لا تُعيد سجلات الرسالة نفسها ما حُذف
+    if (Array.isArray(msg.tombs) && msg.tombs.length) {
+      const dbT = [], lsT = [];
+      for (const x of msg.tombs) {
+        if (!x || !x.t || x.id === undefined || !x.at) continue;
+        (String(x.t).startsWith('ls:') ? lsT : dbT).push(x);
+      }
+      try { if (dbT.length && typeof DB !== 'undefined' && DB.Sync && DB.Sync.mergeTombstones(dbT)) changed = true; } catch (e) { _log('⚠️ تعذّر تطبيق حذف: ' + e.message); }
+      try { if (lsT.length && _applyLsTombs(lsT)) changed = true; } catch (e) { _log('⚠️ تعذّر تطبيق حذف: ' + e.message); }
+    }
     if (Array.isArray(msg.records) && msg.records.length) {
       const byTable = {};
       for (const rec of msg.records) {
@@ -415,14 +616,19 @@ const DakaniOnlineSync = (() => {
         (byTable[rec.t] = byTable[rec.t] || []).push(rec.data);
       }
       for (const table in byTable) {
-        const applied = await _upsertRecordsBatch(table, byTable[table]);
+        const applied = (typeof DB !== 'undefined' && DB.Sync)
+          ? DB.Sync.mergeRecords(table, byTable[table])
+          : await _upsertRecordsBatch(table, byTable[table]);
         if (applied) changed = true;
       }
     }
     if (msg.singles) {
-      if (msg.singles.settings) await _mergeSettings(msg.singles.settings);
+      if (msg.singles.settings) {
+        if (typeof DB !== 'undefined' && DB.Sync) { if (DB.Sync.mergeSettings(msg.singles.settings)) changed = true; }
+        else await _mergeSettings(msg.singles.settings);
+      }
       for (const key in SINGLE_KEYS_LS) {
-        if (msg.singles[key]) { const ok = _mergeLSKeyAdditive(SINGLE_KEYS_LS[key], msg.singles[key]); changed = changed || ok; }
+        if (msg.singles[key]) { const ok = _mergeLSKey(SINGLE_KEYS_LS[key], msg.singles[key], key); changed = changed || ok; }
       }
     }
     if (changed) { _log('🔄 دُمجت بيانات جديدة محلياً'); _scheduleAutoRefresh(); }
@@ -496,7 +702,7 @@ const DakaniOnlineSync = (() => {
     _send(c, { type: 'hello', id: uid(), from: _deviceId(), name: getDeviceName(), ip: publicIp });
     // مزامنة فورية كاملة مع هذا الاتصال الجديد تحديداً
     const snap = await _buildFullSnapshot();
-    if (snap) _send(c, { type: 'snapshot', id: uid(), from: _deviceId(), records: snap.records, singles: snap.singles });
+    if (snap) _send(c, { type: 'snapshot', id: uid(), from: _deviceId(), records: snap.records, tombs: snap.tombs, singles: snap.singles });
     _startPushLoopIfNeeded();
     _renderIfVisible();
   }
@@ -616,8 +822,8 @@ const DakaniOnlineSync = (() => {
   async function _pushNow() {
     if (conns.size === 0) return;
     const delta = await _buildOutgoingDelta();
-    if (delta && (delta.records.length || delta.singles)) {
-      _broadcastToAll({ type: 'delta', id: uid(), from: _deviceId(), records: delta.records, singles: delta.singles });
+    if (delta && (delta.records.length || delta.singles || delta.tombs.length)) {
+      _broadcastToAll({ type: 'delta', id: uid(), from: _deviceId(), records: delta.records, tombs: delta.tombs, singles: delta.singles });
       _log('⚡ بثّ فوري (' + delta.records.length + ' سجل' + (delta.singles ? ' + بيانات صندوق/إعدادات' : '') + ')');
     }
   }
