@@ -129,6 +129,8 @@ const DakaniCloudSync = (() => {
     return out;
   }
   function _restoreLSKeys(keys, data, mode) {
+    window.__dkNoTomb = true; // الاستعادة لا تُعدّ حذفاً (لا تُنقل لبقية الفريق)
+    try {
     if (!data) return;
     keys.forEach(k => {
       const incoming = Array.isArray(data[k]) ? data[k] : [];
@@ -145,6 +147,7 @@ const DakaniCloudSync = (() => {
         try { localStorage.setItem(k, JSON.stringify(incoming)); } catch (e) {}
       }
     });
+      } finally { window.__dkNoTomb = false; }
   }
 
   // ─── قراءة كل بيانات المحل من IndexedDB (نفس منطق backup.js تماماً) ─
