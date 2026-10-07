@@ -1,4 +1,4 @@
-const CACHE_NAME = 'dukani-pos-v14';
+const CACHE_NAME = 'dukani-pos-v16';
 
 const ASSETS = [
     './',
