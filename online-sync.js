@@ -1,0 +1,1657 @@
+/**
+ * DAKANI ONLINE TEAM SYNC (P2P) — العمل الجماعي عبر الإنترنت
+ * ─────────────────────────────────────────────────────────────
+ * ⚠️ ملف مستقل تماماً (بنفس مبدأ accounts.js و cloud-folder-sync.js):
+ *    لا يعدّل أي دالة أو ملف موجود، فقط يضيف صفحة جديدة + محرّك مزامنة
+ *    خلفي، ويستخدم الدوال العامة الجاهزة فقط.
+ *
+ * ⚠️ لا توجد أي قاعدة بيانات وسيطة ولا أي خادم يُخزّن بيانات دكاني:
+ *    النقل يتم مباشرة جهاز-إلى-جهاز عبر WebRTC (نفس التقنية التي
+ *    تعمل بها مكالمات الفيديو المباشرة بين المتصفحات). "الإنترنت"
+ *    أو "الشبكة المحلية" هنا مجرد أنبوب نقل لحظي فقط — لا يمرّ عبره
+ *    أي تخزين لبياناتك عند أي طرف ثالث.
+ *
+ *  وضعان للاتصال:
+ *   1) "عبر الإنترنت" — تلقائي بالكامل، يكفي إدخال نفس "رمز الفريق"
+ *      في كل الأجهزة. نستخدم PeerJS (مكتبة WebRTC مفتوحة المصدر
+ *      ومعروفة) فقط لمساعدة جهازين على "إيجاد" بعضهما (تبادل عنوان
+ *      اتصال WebRTC لثوانٍ معدودة) — لا يمرّ أي بيانات فعلية لدكاني
+ *      عبر خوادمها إطلاقاً، النقل الفعلي يكون مباشراً بين الجهازين.
+ *   2) "اتصال محلي / بدون إنترنت" — يدوي بالكامل عبر نسخ/لصق "رمز"
+ *      قصير بين جهازين (مثل كيبل/نفس الشبكة)، لا يحتاج أي اتصال
+ *      بالإنترنت إطلاقاً إن كان الجهازان على نفس الشبكة المحلية.
+ *
+ *  آلية العمل بدون قاعدة بيانات:
+ *   - كل جهاز يحتفظ محلياً فقط (على نفسه) بسجل "آخر ما أرسله بنجاح"
+ *     لكل عنصر بيانات. عند أي اتصال جديد (بأي جهاز آخر من الفريق،
+ *     بأي وضع)، يُعاد فحص الفرق بين البيانات المحلية وهذا السجل،
+ *     وتُرسَل فوراً كل التغييرات التي لم تُنقل بعد.
+ *   - إن انقطع الإنترنت، يستمر التطبيق يعمل محلياً بشكل طبيعي كالمعتاد
+ *     (كل الميزات محلية 100% أصلاً)، وعند عودة الاتصال (أو عند أول
+ *     اتصال قادم مع أي جهاز آخر من الفريق) تُستكمل عملية النقل تلقائياً
+ *     من حيث توقفت — دون أي تدخل يدوي.
+ *   - كل الرسائل تُعاد بثّها (Flood relay) بين كل الأجهزة المتصلة
+ *     ببعضها البعض (مباشرة أو عبر أجهزة وسيطة من نفس الفريق)، لذا
+ *     تتزامن كل الأجهزة حتى لو لم يكن كل جهازين متصلين ببعضهما مباشرة.
+ *   - لا حذف تلقائي لأي بيانات محلية إطلاقاً (فلسفة آمنة تراكمية،
+ *     نفس مبدأ cloud-folder-sync.js) — فقط إضافة/تحديث ما هو أحدث.
+ *   - صور المنتجات (base64) لا تُنقَل عبر الإنترنت عمداً لأنها ثقيلة
+ *     جداً على اتصال مباشر بين الأجهزة؛ فقط الأسعار والكميات والنصوص.
+ */
+
+const DakaniOnlineSync = (() => {
+
+  // ════════════════════════════════════════════════════════════
+  //  تخزين محلي (خاص بهذا الجهاز فقط — ليس مشتركاً مع أي أحد)
+  // ════════════════════════════════════════════════════════════
+  const LS_TEAMID     = 'dakani_onlinesync_teamid';
+  const LS_DEVICENAME = 'dakani_onlinesync_devname';
+  const LS_PUSHED     = 'dakani_onlinesync_pushed_v2'; // بصمات آخر ما أُرسل بنجاح — أساس استكمال النقل بعد الانقطاع
+  const LS_KICKED_UNTIL = 'dakani_onlinesync_kicked_until';
+
+  const PUSH_INTERVAL_MS   = 3 * 1000;  // فحص التغييرات المحلية وبثّها كل 3 ثوانٍ — إحساس شبه لحظي
+  const RECONNECT_MS       = 3 * 1000;  // محاولة إعادة الاتصال كل 3 ثوانٍ عند الانقطاع — بحث سريع عن الأجهزة
+  const PRESENCE_STALE_MS  = 90 * 1000; // اعتبار الجهاز "غير متصل" إن لم نستلم منه شيئاً منذ هذه المدة
+
+  // خوادم STUN لمساعدة الجهازين على معرفة عنوانيهما العامّين، + خادم TURN عام مجاني
+  // احتياطي للحالات التي يفشل فيها الاتصال المباشر. ⚠️ هذا الخادم المجاني
+  // المشترك (openrelay) خدمة تجريبية غير مضمونة الاستمرار دائماً — للاتصال
+  // الموثوق بين شبكات مختلفة جداً (كواي فاي + بيانات جوال معاً)، يُنصح
+  // بإدخال خادم TURN خاص بك من قسم "إعدادات اتصال متقدمة" في الصفحة (نفس ما
+  // تفعله التطبيقات الكبرى فعلياً — تُشغّل خادم تحويل خاصاً بها).
+  const STUN_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    { urls: 'stun:openrelay.metered.ca:80' },
+    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+  ];
+  const LS_CUSTOM_TURN = 'dakani_onlinesync_custom_turn';
+  function _getIceServers() {
+    const custom = _lsGet(LS_CUSTOM_TURN, null);
+    if (Array.isArray(custom) && custom.length) {
+      // خادمك الخاص يُوضَع أولاً (أولوية أعلى للتجربة)، مع إبقاء الاحتياطي المجاني كطبقة أمان إضافية
+      return custom.concat(STUN_SERVERS);
+    }
+    return STUN_SERVERS;
+  }
+  const LOCAL_ICE_TIMEOUT_MS = 7000; // مهلة انتظار جمع مسارات الاتصال في الوضع المحلي
+
+  const RECORD_TABLES = [
+    'products', 'categories', 'customers', 'sales', 'sale_items',
+    'purchases', 'suppliers', 'debt_payments', 'supplier_payments',
+    'stock_adjustments', 'returns', 'held_sales'
+  ];
+  const SINGLE_KEYS_LS = {
+    cbx_expenses: 'dakani_cbx_expenses', cbx_capital: 'dakani_cbx_capital',
+    cbx_shifts: 'dakani_cbx_shifts', cbx_moves: 'dakani_cbx_moves', cbx_income: 'dakani_cbx_income',
+    managers: 'dakani_manager_profiles', employees: 'dakani_employees'
+  };
+
+  // ─── حالة التشغيل (في الذاكرة فقط) ───────────────────────────
+  let peer = null;                 // كائن PeerJS (وضع الإنترنت فقط)
+  let isHub = false;               // هل هذا الجهاز هو نقطة الالتقاء الحالية على الإنترنت؟
+  let spokeConnecting = false;     // يمنع محاولات اتصال متزامنة مكرّرة بنقطة الالتقاء
+  let internetTimer = null;
+  let staleTimer = null;
+  let failedReconnectCycles = 0;
+  let pushTimer = null;
+  let presenceTimer = null;
+  let pendingLocalPC = null;       // اتصال محلي قيد الإنشاء (بانتظار لصق رمز الرد)
+  let publicIp = '';
+
+  // كل الاتصالات المفتوحة حالياً (إنترنت + محلي) بصيغة موحّدة
+  // key: معرّف داخلي عشوائي للاتصال، value: {send, close, transport, remoteId, remoteName, lastSeen}
+  const conns = new Map();
+  // حضور الأجهزة (معرّف الجهاز → آخر معلومة عنه) — للعرض فقط، ليس سجلاً دائماً
+  const presence = new Map();
+  const seenMsgIds = [];
+  const seenMsgSet = new Set();
+
+  // سجل أحداث حيّ (للتشخيص داخل الصفحة نفسها — يظهر بالضبط أين تتعطّل عملية الاتصال)
+  const DEBUG_LOG = [];
+  let sentCount = 0, recvCount = 0;
+  function _log(msg) {
+    const line = new Date().toLocaleTimeString('ar-DZ', { hour12: false }) + ' — ' + msg;
+    DEBUG_LOG.push(line);
+    if (DEBUG_LOG.length > 80) DEBUG_LOG.shift();
+    try { console.log('[Dukani P2P]', msg); } catch (e) {}
+    _renderIfVisible();
+  }
+
+  // ─── أدوات عامة (نسخة محلية خاصة بهذا الملف — نفس نمط باقي الملفات) ─
+  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const now = () => new Date().toISOString();
+
+  function _lsGet(key, fallback) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; } }
+  function _lsSet(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {} }
+  function _lsGetStr(key) { try { return localStorage.getItem(key) || ''; } catch (e) { return ''; } }
+  function _lsSetStr(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
+  function _lsDel(key) { try { localStorage.removeItem(key); } catch (e) {} }
+
+  // ─── شواهد حذف قوائم localStorage (الصندوق، المناوبات، الموظفون، المدراء) ──────
+  // هذه القوائم تُحفظ مباشرة في localStorage من وحدات أخرى، فنراقب الكتابة عليها:
+  // أي عنصر يختفي من القائمة يُسجَّل له شاهد حذف بوقته ليُنقل لبقية الأجهزة.
+  // لا نسجّل شيئاً أثناء الدمج الداخلي أو استعادة نسخة احتياطية (window.__dkNoTomb).
+  const LS_TOMBS = 'dakani_onlinesync_lstombs_v1';
+  const LS_TOMB_MAX_AGE_DAYS = 120;
+  let _lsInternal = false;
+  function _lsTombs() { return _lsGet(LS_TOMBS, {}); }
+  function _lsTombsSave(o) { _lsSet(LS_TOMBS, o); }
+  function _installLsDeleteTracking() {
+    try {
+      const proto = Storage.prototype;
+      if (proto.__dkDelTrack) return;
+      const origSet = proto.setItem, origGet = proto.getItem;
+      const watch = {};
+      Object.keys(SINGLE_KEYS_LS).forEach(n => { watch[SINGLE_KEYS_LS[n]] = n; });
+      proto.setItem = function (key, value) {
+        try {
+          const name = watch[key];
+          if (name && this === window.localStorage && !_lsInternal && !window.__dkNoTomb) {
+            const prevArr = JSON.parse(origGet.call(this, key) || '[]');
+            const nextArr = JSON.parse(value || '[]');
+            if (Array.isArray(prevArr) && Array.isArray(nextArr)) {
+              const idsOf = arr => new Set(arr.filter(x => x && typeof x === 'object' && x.id !== undefined).map(x => String(x.id)));
+              const prevIds = idsOf(prevArr), nextIds = idsOf(nextArr);
+              const tombs = JSON.parse(origGet.call(this, LS_TOMBS) || '{}');
+              const tm = tombs[name] || (tombs[name] = {});
+              const t = new Date().toISOString();
+              let touched = false;
+              prevIds.forEach(id => { if (!nextIds.has(id)) { tm[id] = t; touched = true; } });
+              nextIds.forEach(id => { if (!prevIds.has(id) && tm[id]) { delete tm[id]; touched = true; } });
+              if (touched) origSet.call(this, LS_TOMBS, JSON.stringify(tombs));
+            }
+          }
+        } catch (e) { /* التتبّع لا يمنع الحفظ أبداً */ }
+        return origSet.apply(this, arguments);
+      };
+      proto.__dkDelTrack = true;
+      // تنظيف الشواهد القديمة جداً
+      const all = JSON.parse(origGet.call(localStorage, LS_TOMBS) || '{}');
+      const cutoff = new Date(Date.now() - LS_TOMB_MAX_AGE_DAYS * 864e5).toISOString();
+      let pruned = false;
+      for (const n in all) for (const id in all[n]) { if (all[n][id] < cutoff) { delete all[n][id]; pruned = true; } }
+      if (pruned) origSet.call(localStorage, LS_TOMBS, JSON.stringify(all));
+    } catch (e) {}
+  }
+  _installLsDeleteTracking();
+
+  // تطبيق حذف قادم من جهاز آخر على قوائم localStorage
+  function _applyLsTombs(list) {
+    let changed = false, touched = false;
+    const all = _lsTombs();
+    const byName = {};
+    for (const x of list) {
+      const name = String(x.t).slice(3);
+      if (!SINGLE_KEYS_LS[name]) continue;
+      (byName[name] = byName[name] || []).push(x);
+    }
+    for (const name in byName) {
+      const tm = all[name] || (all[name] = {});
+      for (const x of byName[name]) {
+        const k = String(x.id);
+        if (!tm[k] || tm[k] < x.at) { tm[k] = x.at; touched = true; }
+      }
+      const lsKey = SINGLE_KEYS_LS[name];
+      let cur = [];
+      try { cur = JSON.parse(localStorage.getItem(lsKey) || '[]'); } catch (e) {}
+      if (!Array.isArray(cur)) continue;
+      const keep = cur.filter(it => {
+        if (it && typeof it === 'object' && it.id !== undefined) {
+          const at = tm[String(it.id)];
+          if (at && _lsTs(it) <= at) return false;
+        }
+        return true;
+      });
+      if (keep.length !== cur.length) {
+        _lsInternal = true;
+        try { localStorage.setItem(lsKey, JSON.stringify(keep)); } finally { _lsInternal = false; }
+        changed = true;
+      }
+    }
+    if (touched) _lsTombsSave(all);
+    return changed;
+  }
+
+  // كل شواهد الحذف (قاعدة البيانات + قوائم localStorage) بصيغة موحّدة {t, id, at}
+  function _collectTombs() {
+    const out = [];
+    try { if (typeof DB !== 'undefined' && DB.Sync) out.push(...DB.Sync.tombstones()); } catch (e) {}
+    try {
+      const all = _lsTombs();
+      for (const name in all) for (const id in all[name]) out.push({ t: 'ls:' + name, id, at: all[name][id] });
+    } catch (e) {}
+    return out;
+  }
+
+  function _isManager() {
+    try { return typeof DakaniAccounts !== 'undefined' && DakaniAccounts.getRole && DakaniAccounts.getRole() === 'manager'; }
+    catch (e) { return false; }
+  }
+  function _deviceId() {
+    try { if (typeof DakaniLicense !== 'undefined' && DakaniLicense.getPermanentDeviceId) return DakaniLicense.getPermanentDeviceId(); }
+    catch (e) {}
+    return 'UNKNOWN';
+  }
+  function _defaultDeviceName() {
+    const ua = navigator.userAgent || '';
+    let browser = 'متصفح';
+    if (/Edg\//.test(ua)) browser = 'Edge';
+    else if (/Chrome\//.test(ua) && !/OPR\//.test(ua)) browser = 'Chrome';
+    else if (/Firefox\//.test(ua)) browser = 'Firefox';
+    else if (/Safari\//.test(ua) && !/Chrome/.test(ua)) browser = 'Safari';
+    const platform = /Android/i.test(ua) ? 'Android' : /iPhone|iPad/i.test(ua) ? 'iOS'
+      : /Win/i.test(navigator.platform || '') ? 'Windows' : /Mac/i.test(navigator.platform || '') ? 'Mac' : 'جهاز';
+    return `${browser} - ${platform}`;
+  }
+  function getTeamId() { return _lsGetStr(LS_TEAMID); }
+  function getDeviceName() { return _lsGetStr(LS_DEVICENAME) || _defaultDeviceName(); }
+  function isConfigured() { return !!getTeamId(); }
+  function isConnected() { return conns.size > 0; }
+
+  function _toast(msg, type) {
+    if (typeof toast === 'function') { toast(msg, type); return; }
+    const colors = { success: '#10b981', error: '#ef4444', info: '#3b82f6', warning: '#f59e0b' };
+    const t = document.createElement('div');
+    t.textContent = msg;
+    Object.assign(t.style, {
+      position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)',
+      background: colors[type] || colors.info, color: '#fff', padding: '12px 24px',
+      borderRadius: '10px', fontFamily: 'Cairo, sans-serif', fontSize: '14px',
+      zIndex: '999999', boxShadow: '0 4px 20px rgba(0,0,0,.3)', transition: 'opacity .4s'
+    });
+    document.body.appendChild(t);
+    setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 3500);
+  }
+  function _clickToast(msg, onClick) {
+    const t = document.createElement('div');
+    t.innerHTML = `<i class="fas fa-rotate"></i> ${escHtml(msg)}`;
+    Object.assign(t.style, {
+      position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)',
+      background: '#0ea5e9', color: '#fff', padding: '12px 22px', cursor: 'pointer',
+      borderRadius: '10px', fontFamily: 'Cairo, sans-serif', fontSize: '14px',
+      zIndex: '999999', boxShadow: '0 4px 20px rgba(0,0,0,.35)', transition: 'opacity .4s',
+      display: 'flex', gap: '8px', alignItems: 'center'
+    });
+    t.onclick = () => { onClick(); t.remove(); };
+    document.body.appendChild(t);
+    setTimeout(() => { if (t.parentNode) { t.style.opacity = '0'; setTimeout(() => t.remove(), 400); } }, 9000);
+  }
+  function _relTime(iso) {
+    if (!iso) return '—';
+    const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (diff < 60) return 'الآن';
+    if (diff < 3600) return `قبل ${Math.floor(diff / 60)} د`;
+    if (diff < 86400) return `قبل ${Math.floor(diff / 3600)} س`;
+    return `قبل ${Math.floor(diff / 86400)} يوم`;
+  }
+
+  async function _getPublicIP() {
+    try {
+      const res = await fetch('https://api.ipify.org?format=json', { cache: 'no-store' });
+      const data = await res.json();
+      return data && data.ip ? data.ip : '';
+    } catch (e) { return ''; }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  رمز الفريق (يُنشأ مرة واحدة، يُشارك بين كل الأجهزة)
+  // ════════════════════════════════════════════════════════════
+  function _genTeamId() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let s = ''; for (let i = 0; i < 10; i++) s += chars[Math.floor(Math.random() * chars.length)];
+    return s;
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  قراءة/دمج البيانات المحلية (IndexedDB) — نفس منطق cloud-folder-sync.js
+  // ════════════════════════════════════════════════════════════
+  function _readAllFromDB() {
+    // المصدر الصحيح الوحيد هو ذاكرة التطبيق الحيّة (DB.Sync) — لا نقرأ IndexedDB مباشرة
+    // لأن التطبيق يعمل على الذاكرة ويكتب منها، وأي كتابة خارجية كانت تضيع أو لا تظهر
+    if (typeof DB !== 'undefined' && DB.Sync) {
+      const out = {};
+      RECORD_TABLES.forEach(t => { out[t] = DB.Sync.table(t); });
+      out.settings = DB.Sync.settings();
+      return Promise.resolve(out);
+    }
+    return new Promise(resolve => {
+      try {
+        const req = indexedDB.open('DakaniDB', 1);
+        req.onsuccess = e => {
+          const idb = e.target.result;
+          const tx = idb.transaction('keyval', 'readonly');
+          const store = tx.objectStore('keyval');
+          const out = {};
+          let pending = RECORD_TABLES.length + 1;
+          RECORD_TABLES.forEach(t => {
+            const r = store.get('dakani_' + t);
+            r.onsuccess = () => { out[t] = Array.isArray(r.result) ? r.result : []; if (--pending === 0) resolve(out); };
+            r.onerror   = () => { out[t] = []; if (--pending === 0) resolve(out); };
+          });
+          const rs = store.get('dakani_settings');
+          rs.onsuccess = () => { out.settings = rs.result || {}; if (--pending === 0) resolve(out); };
+          rs.onerror   = () => { out.settings = {}; if (--pending === 0) resolve(out); };
+        };
+        req.onerror = () => resolve(null);
+      } catch (e) { resolve(null); }
+    });
+  }
+
+  function _upsertRecord(table, item) {
+    return new Promise(resolve => {
+      try {
+        const req = indexedDB.open('DakaniDB', 1);
+        req.onsuccess = e => {
+          const idb = e.target.result;
+          const tx = idb.transaction('keyval', 'readwrite');
+          const store = tx.objectStore('keyval');
+          const key = 'dakani_' + table;
+          const r = store.get(key);
+          r.onsuccess = () => {
+            const list = Array.isArray(r.result) ? r.result.slice() : [];
+            const i = list.findIndex(x => x && x.id === item.id);
+            if (i > -1) {
+              const localTime = list[i].updatedAt || list[i].createdAt || '';
+              const incomingTime = item.updatedAt || item.createdAt || '';
+              if (incomingTime && localTime && incomingTime <= localTime) { resolve(false); return; }
+              list[i] = item;
+            } else { list.push(item); }
+            store.put(list, key);
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+          };
+          r.onerror = () => resolve(false);
+        };
+        req.onerror = () => resolve(false);
+      } catch (e) { resolve(false); }
+    });
+  }
+
+  // نسخة مُجمَّعة: تطبّق كل تحديثات جدول واحد بفتح اتصال واحد فقط بدل فتح
+  // اتصال IndexedDB منفصل لكل سجل — فرق جوهري في الأداء عند وصول لقطة أولى
+  // كاملة (مئات المنتجات/الفواتير دفعة واحدة عند انضمام جهاز جديد للفريق)
+  function _upsertRecordsBatch(table, items) {
+    return new Promise(resolve => {
+      if (!items || !items.length) { resolve(false); return; }
+      try {
+        const req = indexedDB.open('DakaniDB', 1);
+        req.onsuccess = e => {
+          const idb = e.target.result;
+          const tx = idb.transaction('keyval', 'readwrite');
+          const store = tx.objectStore('keyval');
+          const key = 'dakani_' + table;
+          const r = store.get(key);
+          r.onsuccess = () => {
+            const list = Array.isArray(r.result) ? r.result.slice() : [];
+            const indexById = new Map(list.map((x, idx) => [x && x.id, idx]));
+            let changedAny = false;
+            for (const item of items) {
+              if (!item || item.id === undefined) continue;
+              const i = indexById.has(item.id) ? indexById.get(item.id) : -1;
+              if (i > -1) {
+                const localTime = list[i].updatedAt || list[i].createdAt || '';
+                const incomingTime = item.updatedAt || item.createdAt || '';
+                if (incomingTime && localTime && incomingTime <= localTime) continue;
+                list[i] = item; changedAny = true;
+              } else {
+                indexById.set(item.id, list.length);
+                list.push(item); changedAny = true;
+              }
+            }
+            if (!changedAny) { resolve(false); return; }
+            store.put(list, key);
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+          };
+          r.onerror = () => resolve(false);
+        };
+        req.onerror = () => resolve(false);
+      } catch (e) { resolve(false); }
+    });
+  }
+
+  function _mergeSettings(remoteSettings) {
+    return new Promise(resolve => {
+      try {
+        const req = indexedDB.open('DakaniDB', 1);
+        req.onsuccess = e => {
+          const idb = e.target.result;
+          const tx = idb.transaction('keyval', 'readwrite');
+          const store = tx.objectStore('keyval');
+          const r = store.get('dakani_settings');
+          r.onsuccess = () => {
+            const merged = Object.assign({}, remoteSettings || {}, r.result || {}); // المحلي له الأولوية دائماً
+            store.put(merged, 'dakani_settings');
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+          };
+          r.onerror = () => resolve(false);
+        };
+        req.onerror = () => resolve(false);
+      } catch (e) { resolve(false); }
+    });
+  }
+
+  // ─── دمج قوائم localStorage (الصندوق، المناوبات، الموظفون، المدراء) ─────────
+  // كان الدمج السابق "إضافة فقط": أي تعديل على عنصر موجود (مثل إغلاق مناوبة أو تعديل
+  // موظف) لا يصل أبداً للأجهزة الأخرى، فتبقى المناوبة "مفتوحة" عندها للأبد.
+  // الآن: لكل عنصر بنفس المعرّف تفوز النسخة الأحدث، والمناوبة المغلقة لا تعود مفتوحة.
+  function _lsTs(it) {
+    return (it && typeof it === 'object') ? (it.updatedAt || it.closedAt || it.createdAt || it.openedAt || it.date || '') : '';
+  }
+  function _lsIncomingWins(loc, inc) {
+    if (loc && inc && loc.status && inc.status && loc.status !== inc.status) {
+      if (inc.status === 'closed') return true;
+      if (loc.status === 'closed') return false;
+    }
+    const lt = _lsTs(loc), it = _lsTs(inc);
+    if (it > lt) return true;
+    if (it < lt) return false;
+    const a = JSON.stringify(inc), b = JSON.stringify(loc);
+    return a !== b && a > b;
+  }
+  function _mergeLSKey(lsKey, incomingArr, name) {
+    try {
+      const allTombs = name ? _lsTombs() : null;
+      const tm = allTombs ? (allTombs[name] || {}) : {};
+      let tombTouched = false;
+      let current = [];
+      try { current = JSON.parse(localStorage.getItem(lsKey) || '[]'); } catch (e) {}
+      if (!Array.isArray(current)) current = [];
+      const idx = new Map();
+      current.forEach((it, i) => { if (it && typeof it === 'object' && it.id !== undefined) idx.set(it.id, i); });
+      let changed = false;
+      for (const inc of (Array.isArray(incomingArr) ? incomingArr : [])) {
+        if (inc && typeof inc === 'object' && inc.id !== undefined) {
+          // عنصر محذوف عندنا: لا يعود إلا إن عُدّل بعد وقت الحذف
+          const tat = tm[String(inc.id)];
+          if (tat) {
+            if (_lsTs(inc) <= tat) continue;
+            delete tm[String(inc.id)]; tombTouched = true;
+          }
+          if (!idx.has(inc.id)) { idx.set(inc.id, current.length); current.push(inc); changed = true; }
+          else {
+            const i = idx.get(inc.id);
+            if (_lsIncomingWins(current[i], inc)) { current[i] = inc; changed = true; }
+          }
+        } else if (inc !== undefined && inc !== null) {
+          const str = JSON.stringify(inc);
+          if (!current.some(c => JSON.stringify(c) === str)) { current.push(inc); changed = true; }
+        }
+      }
+      if (changed) {
+        _lsInternal = true;
+        try { localStorage.setItem(lsKey, JSON.stringify(current)); } finally { _lsInternal = false; }
+      }
+      if (tombTouched && allTombs) { allTombs[name] = tm; _lsTombsSave(allTombs); }
+      return changed;
+    } catch (e) { _lsInternal = false; return false; }
+  }
+
+  function _mergeLSKeyAdditive(lsKey, incomingArr) {
+    try {
+      let current = [];
+      try { current = JSON.parse(localStorage.getItem(lsKey) || '[]'); } catch (e) {}
+      const existingIds = new Set(current.map(item => (item && typeof item === 'object') ? item.id : item));
+      const additions = (Array.isArray(incomingArr) ? incomingArr : []).filter(item => {
+        const id = (item && typeof item === 'object') ? item.id : item;
+        return id === undefined || !existingIds.has(id);
+      });
+      if (additions.length) localStorage.setItem(lsKey, JSON.stringify(current.concat(additions)));
+      return additions.length > 0;
+    } catch (e) { return false; }
+  }
+
+  // بصمة محتوى سريعة (cyrb53) — لا تعتمد على الطول أو الختم الزمني وحدهما
+  function _hash(str) {
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < str.length; i++) {
+      const ch = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+  }
+  // الجداول التي تتغير سجلاتها بعد إنشائها (ديون، مخزون، أرصدة...) تُبصَم بمحتواها كاملاً
+  // (بدون الصورة)، فأي تعديل مهما صغر يُرسَل. الجداول الأخرى (فواتير...) ثابتة بعد إنشائها.
+  const HASHED_TABLES = ['products', 'customers', 'suppliers', 'categories', 'purchases', 'held_sales'];
+  function _sig(item, table) {
+    const ts = (item && (item.updatedAt || item.createdAt)) ? String(item.updatedAt || item.createdAt) : '';
+    if (HASHED_TABLES.includes(table)) {
+      const o = Object.assign({}, item); delete o.image;
+      return ts + '|' + _hash(JSON.stringify(o));
+    }
+    return ts || (JSON.stringify(item).length + '');
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  بناء رسالة "كل ما لم يُنقل بعد" (نفس الأساس الذي يضمن استكمال
+  //  النقل تلقائياً بعد أي انقطاع، لأن السجل محلي دائم في localStorage)
+  // ════════════════════════════════════════════════════════════
+  async function _buildOutgoingDelta() {
+    const data = await _readAllFromDB();
+    if (!data) return null;
+    const pushedMap = _lsGet(LS_PUSHED, {});
+    const records = [];
+    for (const table of RECORD_TABLES) {
+      pushedMap[table] = pushedMap[table] || {};
+      for (const item of (data[table] || [])) {
+        if (!item || item.id === undefined) continue;
+        const sig = _sig(item, table);
+        if (pushedMap[table][item.id] === sig) continue;
+        const clean = (table === 'products' && item.image) ? Object.assign({}, item, { image: undefined }) : item;
+        records.push({ t: table, id: item.id, data: clean });
+        pushedMap[table][item.id] = sig;
+      }
+    }
+    const singles = {};
+    singles.settings = data.settings || {};
+    for (const key in SINGLE_KEYS_LS) {
+      try { singles[key] = JSON.parse(localStorage.getItem(SINGLE_KEYS_LS[key]) || '[]'); } catch (e) { singles[key] = []; }
+    }
+    // بصمة خفيفة لمجموعة singles (منفصلة تماماً عن تتبّع السجلات) — بدون هذا
+    // كانت تغييرات الصندوق/الموظفين/الإعدادات تُهمَل بالكامل إن لم يتغيّر أي
+    // منتج أو فاتورة معها في نفس الدورة، وهي عِلّة حقيقية أصلحناها هنا
+    // (الشعار الكبير يُختزل لبصمة خفيفة حتى لا نُعيد حساب ميغابايت كل 3 ثوانٍ)
+    const lite = Object.assign({}, singles, { settings: Object.assign({}, singles.settings) });
+    if (typeof lite.settings.logo === 'string' && lite.settings.logo.length > 200) {
+      lite.settings.logo = 'L' + lite.settings.logo.length + ':' + lite.settings.logo.slice(-60);
+    }
+    const singlesSig = _hash(JSON.stringify(lite));
+    const singlesChanged = pushedMap.__singlesSig !== singlesSig;
+    if (singlesChanged) pushedMap.__singlesSig = singlesSig;
+    // شواهد الحذف: نرسل فقط ما لم يُرسَل بعد (نفس أسلوب تتبّع السجلات)
+    const tombs = [];
+    const tmap = pushedMap.__tomb || (pushedMap.__tomb = {});
+    for (const x of _collectTombs()) {
+      const k = x.t + '|' + x.id;
+      if (tmap[k] !== x.at) { tombs.push(x); tmap[k] = x.at; }
+    }
+    _lsSet(LS_PUSHED, pushedMap);
+    return { records, singles: singlesChanged ? singles : null, tombs };
+  }
+
+  // رسالة كاملة (تُرسَل مرة واحدة فقط لكل اتصال جديد، لضمان التقاء البيانات فوراً)
+  async function _buildFullSnapshot() {
+    const data = await _readAllFromDB();
+    if (!data) return null;
+    const records = [];
+    for (const table of RECORD_TABLES) {
+      for (const item of (data[table] || [])) {
+        if (!item || item.id === undefined) continue;
+        const clean = (table === 'products' && item.image) ? Object.assign({}, item, { image: undefined }) : item;
+        records.push({ t: table, id: item.id, data: clean });
+      }
+    }
+    const singles = { settings: data.settings || {} };
+    for (const key in SINGLE_KEYS_LS) {
+      try { singles[key] = JSON.parse(localStorage.getItem(SINGLE_KEYS_LS[key]) || '[]'); } catch (e) { singles[key] = []; }
+    }
+    return { records, singles, tombs: _collectTombs() };
+  }
+
+  async function _applyIncoming(msg) {
+    let changed = false;
+    // 1) الحذف أولاً — حتى لا تُعيد سجلات الرسالة نفسها ما حُذف
+    if (Array.isArray(msg.tombs) && msg.tombs.length) {
+      const dbT = [], lsT = [];
+      for (const x of msg.tombs) {
+        if (!x || !x.t || x.id === undefined || !x.at) continue;
+        (String(x.t).startsWith('ls:') ? lsT : dbT).push(x);
+      }
+      try { if (dbT.length && typeof DB !== 'undefined' && DB.Sync && DB.Sync.mergeTombstones(dbT)) changed = true; } catch (e) { _log('⚠️ تعذّر تطبيق حذف: ' + e.message); }
+      try { if (lsT.length && _applyLsTombs(lsT)) changed = true; } catch (e) { _log('⚠️ تعذّر تطبيق حذف: ' + e.message); }
+    }
+    if (Array.isArray(msg.records) && msg.records.length) {
+      const byTable = {};
+      for (const rec of msg.records) {
+        if (!rec || !rec.t || rec.id === undefined) continue;
+        (byTable[rec.t] = byTable[rec.t] || []).push(rec.data);
+      }
+      for (const table in byTable) {
+        const applied = (typeof DB !== 'undefined' && DB.Sync)
+          ? DB.Sync.mergeRecords(table, byTable[table])
+          : await _upsertRecordsBatch(table, byTable[table]);
+        if (applied) changed = true;
+      }
+    }
+    if (msg.singles) {
+      if (msg.singles.settings) {
+        if (typeof DB !== 'undefined' && DB.Sync) { if (DB.Sync.mergeSettings(msg.singles.settings)) changed = true; }
+        else await _mergeSettings(msg.singles.settings);
+      }
+      for (const key in SINGLE_KEYS_LS) {
+        if (msg.singles[key]) { const ok = _mergeLSKey(SINGLE_KEYS_LS[key], msg.singles[key], key); changed = changed || ok; }
+      }
+    }
+    if (changed) { _log('🔄 دُمجت بيانات جديدة محلياً'); _scheduleAutoRefresh(); }
+  }
+
+  // ─── تحديث تلقائي هادئ (بلا أي إعادة تحميل للمتصفح وبلا أي زر) ─────────
+  // نعيد رسم الصفحة الحالية فقط في مكانها (نفس الأسلوب الذي يستخدمه البرنامج
+  // أصلاً بعد "تراجع عن عملية") — لا وميض، لا فقدان مكان المستخدم، ولا مقاطعة
+  // إطلاقاً إن كان في منتصف عملية بيع أو نافذة مفتوحة (يُؤجَّل بصمت لحينها)
+  let _autoRefreshPending = false;
+  function _scheduleAutoRefresh() {
+    _autoRefreshPending = true;
+    _tryAutoRefresh();
+  }
+  function _tryAutoRefresh() {
+    if (!_autoRefreshPending) return;
+    const modalOpen = !!document.querySelector('.modal-overlay.active');
+    const onSellPage = document.getElementById('page-sell')?.classList.contains('active');
+    if (modalOpen || onSellPage) { setTimeout(_tryAutoRefresh, 5000); return; }
+    _autoRefreshPending = false;
+    _refreshCurrentPageInPlace();
+    _notifySyncedQuietly();
+  }
+
+  // يعيد رسم الصفحة الظاهرة حالياً فقط عبر استدعاء navigateTo لنفس الصفحة —
+  // نفس ما يفعله البرنامج تماماً بعد أي "تراجع"، فهو آمن ومجرَّب مسبقاً
+  function _refreshCurrentPageInPlace() {
+    try {
+      const activeEl = document.querySelector('.page.active');
+      const page = activeEl ? activeEl.id.replace('page-', '') : '';
+      if (page && page !== 'online-sync' && typeof navigateTo === 'function') navigateTo(page);
+      if (typeof checkAlerts === 'function') checkAlerts();
+      if (typeof updateUndoButton === 'function') updateUndoButton();
+    } catch (e) { _log('⚠️ تعذّر تحديث الصفحة الحالية تلقائياً: ' + (e && e.message || e)); }
+  }
+
+  // تنبيه خفيف جداً يظهر وسط الشاشة السفلي ويختفي من نفسه خلال ثوانٍ — لإعلام
+  // من يشاهد الشاشة (كالمدير) أن مزامنة حدثت، دون طلب أي إجراء أو مقاطعته
+  function _notifySyncedQuietly() {
+    const t = document.createElement('div');
+    t.innerHTML = `<i class="fas fa-check-circle"></i> تمت مزامنة بيانات جديدة من الفريق`;
+    Object.assign(t.style, {
+      position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)',
+      background: 'rgba(16,185,129,.95)', color: '#fff', padding: '9px 18px',
+      borderRadius: '20px', fontFamily: 'Cairo, sans-serif', fontSize: '12.5px',
+      zIndex: '999999', boxShadow: '0 4px 16px rgba(0,0,0,.25)', transition: 'opacity .5s',
+      pointerEvents: 'none', display: 'flex', gap: '6px', alignItems: 'center'
+    });
+    document.body.appendChild(t);
+    setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 500); }, 2500);
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  طبقة الاتصالات الموحّدة (تُخفي الفرق بين إنترنت/محلي عن باقي الكود)
+  // ════════════════════════════════════════════════════════════
+  function _registerConn(sendFn, closeFn, transport) {
+    const cid = uid();
+    const c = { id: cid, transport, send: sendFn, close: closeFn, remoteId: null, remoteName: null, remoteIp: '', lastSeen: now() };
+    conns.set(cid, c);
+    return c;
+  }
+  function _unregisterConn(cid) {
+    conns.delete(cid);
+    _renderIfVisible();
+  }
+
+  async function _onConnOpen(c) {
+    _log(`✅ اتصال جديد مفتوح (${c.transport === 'internet' ? 'إنترنت' : 'محلي'}) — جارٍ إرسال التعريف والبيانات...`);
+    // أول رسالة: تعريف بالجهاز
+    if (!publicIp) publicIp = await _getPublicIP();
+    _send(c, { type: 'hello', id: uid(), from: _deviceId(), name: getDeviceName(), ip: publicIp });
+    // مزامنة فورية كاملة مع هذا الاتصال الجديد تحديداً
+    const snap = await _buildFullSnapshot();
+    if (snap) _send(c, { type: 'snapshot', id: uid(), from: _deviceId(), records: snap.records, tombs: snap.tombs, singles: snap.singles });
+    _startPushLoopIfNeeded();
+    _renderIfVisible();
+  }
+  function _onConnClose(c) {
+    _log(`⛔ انقطع اتصال (${c.transport === 'internet' ? 'إنترنت' : 'محلي'})${c.remoteName ? ' مع ' + c.remoteName : ''}`);
+    _unregisterConn(c.id);
+    if (c.remoteId) presence.delete(c.remoteId);
+    // تنظيف أي أجزاء رسائل كبيرة لم تكتمل بعد لهذا الاتصال (تفادي تسرّب ذاكرة)
+    for (const key of Array.from(chunkBuffers.keys())) { if (key.startsWith(c.id + '|')) chunkBuffers.delete(key); }
+    if (conns.size === 0 && pushTimer) { clearInterval(pushTimer); pushTimer = null; }
+    _renderIfVisible();
+  }
+
+  // ─── إرسال آمن: يقسّم أي رسالة كبيرة إلى أجزاء صغيرة تلقائياً ─────────────
+  // (هذا هو الإصلاح الجوهري لعطل "Message too big for JSON channel" — قنوات
+  // WebRTC/PeerJS لها حد أقصى لحجم الرسالة الواحدة، وبيانات المحل الكاملة
+  // غالباً أكبر من ذلك بكثير)
+  const CHUNK_SIZE = 12000; // بالأحرف — أقل من أي حد معروف لقنوات البيانات (حتى المتحفّظة منها)
+  function _rawSend(c, obj) {
+    try { c.send(obj); }
+    catch (e) { _log('⚠️ فشل إرسال جزء رسالة: ' + (e && e.message || e)); }
+  }
+  function _send(c, obj) {
+    let str;
+    try { str = JSON.stringify(obj); } catch (e) { _log('⚠️ تعذّر تجهيز رسالة للإرسال'); return; }
+    sentCount++;
+    if (str.length <= CHUNK_SIZE) { _rawSend(c, obj); return; }
+    const cid = obj.id || uid();
+    const total = Math.ceil(str.length / CHUNK_SIZE);
+    for (let i = 0; i < total; i++) {
+      _rawSend(c, { type: '__chunk', cid, seq: i, total, part: str.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE) });
+    }
+    _log(`📦 أُرسلت رسالة كبيرة (${(str.length / 1024).toFixed(0)} كيلوبايت) على ${total} جزءاً`);
+  }
+
+  // ─── استقبال: يجمّع أجزاء الرسائل الكبيرة قبل تمريرها للمعالجة العادية ────
+  const chunkBuffers = new Map(); // key: connId+'|'+cid → {parts, total, received}
+  function _onRawMessage(raw, c) {
+    if (!raw) return;
+    if (raw.type === '__chunk') { _handleChunk(raw, c); return; }
+    _onMessage(raw, c);
+  }
+  function _handleChunk(msg, c) {
+    const key = c.id + '|' + msg.cid;
+    let buf = chunkBuffers.get(key);
+    if (!buf) { buf = { parts: new Array(msg.total), received: 0, total: msg.total }; chunkBuffers.set(key, buf); }
+    if (buf.parts[msg.seq] === undefined) buf.received++;
+    buf.parts[msg.seq] = msg.part;
+    if (buf.received === buf.total) {
+      chunkBuffers.delete(key);
+      try {
+        const full = JSON.parse(buf.parts.join(''));
+        _log('📦 اكتمل تجميع رسالة كبيرة (' + msg.total + ' أجزاء) — جارٍ المعالجة');
+        _onMessage(full, c);
+      } catch (e) { _log('❌ فشل تجميع رسالة كبيرة: ' + (e && e.message || e)); }
+    }
+  }
+
+  function _broadcastToAll(obj) { conns.forEach(c => _send(c, obj)); }
+  function _relayToOthers(obj, exceptConnId) { conns.forEach(c => { if (c.id !== exceptConnId) _send(c, obj); }); }
+
+  async function _onMessage(msg, c) {
+    if (!msg || !msg.id) { _log('⚠️ وصلت رسالة بلا معرّف — تم تجاهلها'); return; }
+    recvCount++;
+    if (seenMsgSet.has(msg.id)) return; // منع التكرار/الحلقات عند إعادة البث
+    seenMsgSet.add(msg.id); seenMsgIds.push(msg.id);
+    if (seenMsgIds.length > 800) { const old = seenMsgIds.shift(); seenMsgSet.delete(old); }
+    if (msg.from === _deviceId()) return;
+
+    c.lastSeen = now();
+
+    switch (msg.type) {
+      case 'hello':
+        _log('📩 استلمت تعريفاً من: ' + (msg.name || msg.from));
+        c.remoteId = msg.from; c.remoteName = msg.name; c.remoteIp = msg.ip;
+        presence.set(msg.from, { name: msg.name, ip: msg.ip, transport: c.transport, lastSeen: now() });
+        _renderIfVisible();
+        break;
+      case 'snapshot':
+      case 'delta':
+        if (c.remoteId) presence.set(c.remoteId, Object.assign({}, presence.get(c.remoteId) || { name: c.remoteName, ip: c.remoteIp, transport: c.transport }, { lastSeen: now() }));
+        await _applyIncoming(msg);
+        break;
+      case 'kick':
+        if (msg.targetId === _deviceId()) _handleBeingKicked();
+        break;
+      case 'ping':
+        break; // مجرد نبضة لإبقاء الاتصال حياً — تحديث lastSeen تم أعلاه بالفعل
+    }
+    if (msg.type !== 'ping') _relayToOthers(msg, c.id);
+  }
+
+  function _handleBeingKicked() {
+    _lsSetStr(LS_KICKED_UNTIL, String(Date.now() + 10 * 60 * 1000)); // تهدئة 10 دقائق قبل إعادة محاولة تلقائية
+    _stopEverything();
+    _toast('🔌 تم فصلك من الفريق بواسطة المدير', 'warning');
+    _renderIfVisible();
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  دورة رفع الفروقات (طالما هناك اتصال واحد على الأقل مفتوح)
+  // ════════════════════════════════════════════════════════════
+  function _startPushLoopIfNeeded() {
+    if (pushTimer) return;
+    pushTimer = setInterval(async () => {
+      if (conns.size === 0) return;
+      // نبضة إبقاء حيّ دائمة — حتى إن لم توجد بيانات جديدة، لضمان بقاء الاتصال
+      // مفتوحاً باستمرار طالما الإنترنت متوفر (بعض الشبكات/الراوترات تُغلق
+      // الاتصال الخامل تلقائياً بعد مدة قصيرة من عدم النشاط)
+      _broadcastToAll({ type: 'ping', id: uid(), from: _deviceId() });
+      await _pushNow();
+    }, PUSH_INTERVAL_MS);
+  }
+
+  // بثّ فوري خارج الدورة الزمنية — يُستخدم مباشرة بعد حدث مهم (كإتمام بيع)
+  // بدل انتظار الدورة التالية، حتى تصل الفاتورة لبقية الأجهزة خلال أجزاء من الثانية
+  async function _pushNow() {
+    if (conns.size === 0) return;
+    const delta = await _buildOutgoingDelta();
+    if (delta && (delta.records.length || delta.singles || delta.tombs.length)) {
+      _broadcastToAll({ type: 'delta', id: uid(), from: _deviceId(), records: delta.records, tombs: delta.tombs, singles: delta.singles });
+      _log('⚡ بثّ فوري (' + delta.records.length + ' سجل' + (delta.singles ? ' + بيانات صندوق/إعدادات' : '') + ')');
+    }
+  }
+
+  // يلتقط لحظة إتمام البيع مباشرة (checkout) ويدفع البيانات فوراً بعدها —
+  // هذا يضمن وصول الفاتورة لبقية الأجهزة خلال ثوانٍ معدودة بدل انتظار الدورة
+  // الدورية. لا يُعدَّل checkout نفسها إطلاقاً، فقط نلتف حولها (نفس أسلوب
+  // التفاف navigateTo أدناه، وهو نمط مستخدم أصلاً وآمن في هذا المشروع)
+  function _wrapCheckout() {
+    if (typeof window.checkout !== 'function' || window.checkout.__dakaniOnlineWrapped) return;
+    const original = window.checkout;
+    const wrapped = function (...args) {
+      const result = original.apply(this, args);
+      setTimeout(() => _pushNow(), 400); // مهلة قصيرة لضمان اكتمال كتابة البيع في القاعدة المحلية أولاً
+      return result;
+    };
+    wrapped.__dakaniOnlineWrapped = true;
+    window.checkout = wrapped;
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  الوضع 1: عبر الإنترنت (تلقائي — PeerJS لمجرد "التعارف" الأولي)
+  // ════════════════════════════════════════════════════════════
+  function _peerOpts() {
+    return { config: { iceServers: _getIceServers(), iceCandidatePoolSize: 6 }, debug: 0 };
+  }
+
+  function _hubId(teamId) { return 'dkteam-' + teamId; }
+
+  function startInternetMode() {
+    if (Date.now() < parseInt(_lsGetStr(LS_KICKED_UNTIL) || '0', 10)) {
+      _toast('⏳ انتظر قليلاً قبل إعادة الاتصال (تم فصلك مؤخراً من قبل المدير)', 'warning');
+      return;
+    }
+    if (typeof Peer === 'undefined') { _toast('⚠️ تعذّر تحميل مكوّن الاتصال — تحقق من اتصالك بالإنترنت', 'error'); return; }
+    _startStaleWatchdog();
+    if (internetTimer) return; // يعمل بالفعل
+    _log('▶️ بدء وضع الإنترنت — محاولة الاتصال...');
+    _tryBecomeHubOrSpoke();
+    internetTimer = setInterval(() => {
+      if (!peer || peer.destroyed) { failedReconnectCycles = 0; _tryBecomeHubOrSpoke(); return; }
+      if (isHub) { failedReconnectCycles = 0; return; } // نقطة الالتقاء تنتظر فقط، لا شيء لتفعله
+      if (_hasOpenInternetConn()) { failedReconnectCycles = 0; return; } // كل شيء تمام
+
+      failedReconnectCycles++;
+      const teamId = getTeamId();
+      if (failedReconnectCycles >= 3) {
+        // عدة محاولات خفيفة فشلت — قد تكون نقطة الالتقاء السابقة اختفت نهائياً
+        // (مثلاً أغلق صاحبها التطبيق) — نحاول من جديد بالكامل، وقد يصبح هذا
+        // الجهاز نفسه نقطة الالتقاء الجديدة تلقائياً
+        failedReconnectCycles = 0;
+        spokeConnecting = false;
+        _resetPeer('عدة محاولات فاشلة متتالية');
+        _tryBecomeHubOrSpoke();
+        return;
+      }
+      if (spokeConnecting) return; // محاولة سابقة لم تُحسم بعد — لا نُنشئ اتصالاً مكرَّراً فوقها
+      // محاولة خفيفة وسريعة أولاً: إعادة الاتصال بنفس الجلسة الحالية (أسرع من إعادة البناء الكاملة)
+      if (peer && !peer.destroyed && !peer.disconnected && teamId) {
+        _log('🔁 إعادة محاولة الاتصال بنقطة الالتقاء (محاولة ' + failedReconnectCycles + ')');
+        spokeConnecting = true;
+        try { _wirePeerJsConn(peer.connect(_hubId(teamId), { reliable: true, serialization: 'json' })); }
+        catch (e) { spokeConnecting = false; _resetPeer('فشل إعادة الاتصال السريع'); _tryBecomeHubOrSpoke(); }
+      } else {
+        _tryBecomeHubOrSpoke();
+      }
+    }, RECONNECT_MS);
+  }
+
+  // حارس الاتصالات "المتجمّدة": إن لم تصل ولو نبضة واحدة من اتصال ما خلال
+  // مدة معقولة (رغم أننا نرسل نبضة كل 3 ثوانٍ)، فهو على الأرجح ميت فعلياً
+  // حتى لو لم يُخبرنا المتصفح بذلك — نغلقه يدوياً لنفسح المجال لإعادة الاتصال
+  const CONN_STALE_MS = 16000;
+  function _startStaleWatchdog() {
+    if (staleTimer) return;
+    staleTimer = setInterval(() => {
+      const cutoff = Date.now() - CONN_STALE_MS;
+      conns.forEach(c => {
+        if (new Date(c.lastSeen).getTime() < cutoff) {
+          _log('💀 اتصال متجمّد (لا استجابة منذ أكثر من ' + Math.round(CONN_STALE_MS / 1000) + 'ث) — إعادة تأسيسه');
+          try { c.close(); } catch (e) {}
+          _onConnClose(c);
+        }
+      });
+    }, 5000);
+  }
+
+  function _hasOpenInternetConn() {
+    for (const c of conns.values()) if (c.transport === 'internet') return true;
+    return false;
+  }
+
+  function _resetPeer(reason) {
+    if (reason) _log('🔄 إعادة تهيئة الاتصال: ' + reason);
+    if (peer) { try { peer.destroy(); } catch (e) {} }
+    peer = null; isHub = false; spokeConnecting = false;
+  }
+
+  function _tryBecomeHubOrSpoke() {
+    if (peer && !peer.destroyed) return;
+    const teamId = getTeamId();
+    if (!teamId) return;
+    _log('🔎 محاولة أن أصبح نقطة الالتقاء (hub) لرمز الفريق: ' + teamId);
+    let p;
+    try { p = new Peer(_hubId(teamId), _peerOpts()); }
+    catch (e) { _log('❌ تعذّر إنشاء اتصال WebRTC: ' + (e && e.message || e)); return; }
+    peer = p;
+    let settled = false;
+
+    p.on('open', () => {
+      settled = true;
+      isHub = true;
+      _log('👑 أصبحت هذا الجهاز نقطة الالتقاء — بانتظار انضمام الأجهزة الأخرى');
+      p.on('connection', spokeConn => { _log('📞 جهاز آخر يحاول الاتصال بي...'); _wirePeerJsConn(spokeConn); });
+    });
+
+    p.on('disconnected', () => {
+      _log('⚠️ انقطع الاتصال بخادم التعارف — محاولة إعادة اتصال سريعة (دون قطع الأجهزة المرتبطة بالفعل)');
+      if (!p.destroyed) { try { p.reconnect(); } catch (e) { _resetPeer('فشلت إعادة الاتصال السريعة'); } }
+    });
+
+    p.on('error', err => {
+      const type = err && err.type;
+      _log('⚠️ خطأ اتصال (' + type + ')' + (settled ? ' — بعد أن كنت متصلاً بالفعل' : ''));
+      if (!settled && type === 'unavailable-id') {
+        settled = true;
+        isHub = false;
+        try { p.destroy(); } catch (e) {}
+        peer = null;
+        _connectAsSpoke(teamId);
+        return;
+      }
+      // أخطاء الشبكة العابرة لا تُسقط الأجهزة المتصلة فعلياً بالفعل — فقط تمنع اتصالات جديدة مؤقتاً
+      if (_hasOpenInternetConn() && (type === 'network' || type === 'socket-error' || type === 'socket-closed')) {
+        _log('ℹ️ الأجهزة المتصلة حالياً تبقى متصلة رغم هذا الخطأ — سيتعافى الاتصال بخادم التعارف تلقائياً');
+        return;
+      }
+      // أي خطأ آخر (شبكة/خادم/متصفح) بلا اتصالات مفتوحة حالياً: لا نبقى عالقين — نصفّر الحالة ليعيد المؤقّت المحاولة تلقائياً
+      _resetPeer(null);
+    });
+  }
+
+  function _connectAsSpoke(teamId) {
+    const myId = 'dk-' + teamId + '-' + _deviceId() + '-' + Math.random().toString(36).slice(2, 6);
+    _log('🔗 نقطة الالتقاء مشغولة من جهاز آخر — أتصل بها كعضو في الفريق');
+    let p;
+    try { p = new Peer(myId, _peerOpts()); } catch (e) { _log('❌ تعذّر إنشاء اتصال WebRTC: ' + (e && e.message || e)); return; }
+    peer = p;
+    p.on('open', () => {
+      const conn = p.connect(_hubId(teamId), { reliable: true, serialization: 'json' });
+      _wirePeerJsConn(conn);
+    });
+    p.on('disconnected', () => {
+      _log('⚠️ انقطع الاتصال بخادم التعارف (كعضو) — محاولة إعادة اتصال سريعة');
+      if (!p.destroyed) { try { p.reconnect(); } catch (e) { _resetPeer('فشلت إعادة الاتصال السريعة (كعضو)'); } }
+    });
+    p.on('error', err => {
+      const type = err && err.type;
+      _log('⚠️ خطأ اتصال كعضو (' + type + ') — ستُعاد المحاولة تلقائياً');
+      if (_hasOpenInternetConn() && (type === 'network' || type === 'socket-error' || type === 'socket-closed')) return;
+      _resetPeer(null);
+    });
+  }
+
+  // يراقب الاتصال الفعلي (WebRTC/ICE) خلف PeerJS — يكشف تحديداً حالات فشل عبور الشبكات (NAT)
+  // وهي السبب الأكثر شيوعاً لظهور "متصل" في جهاز و"غير متصل" في الآخر
+  function _watchIceState(peerConn) {
+    try {
+      const pc = peerConn.peerConnection;
+      if (!pc) return;
+      let disconnectedCount = 0;
+      const startedAt = Date.now();
+      pc.oniceconnectionstatechange = () => {
+        _log('🧭 حالة الشبكة (ICE): ' + pc.iceConnectionState);
+        if (pc.iceConnectionState === 'disconnected') {
+          disconnectedCount++;
+          // نمط "checking ← disconnected" المتكرر بلا وصول لـ connected خلال مدة معقولة
+          // = فشل اختراق شبكات NAT بين الجهازين (شائع جداً بين واي فاي وبيانات جوال معاً)
+          // ولا حل له سوى خادم TURN يعمل فعلياً كوسيط تمرير للبيانات
+          if (disconnectedCount >= 3 && Date.now() - startedAt > 15000) {
+            _log('🧩 تشخيص: الشبكتان مختلفتان جداً (NAT صارم) ولا يوجد مسار مباشر بينهما');
+            _toast('⚠️ الشبكتان (واي فاي + بيانات جوال) لا تسمحان باتصال مباشر — أضف خادم TURN خاصاً من "إعدادات اتصال متقدمة" أسفل هذه الصفحة', 'warning');
+          }
+        }
+        if (pc.iceConnectionState === 'failed') {
+          _toast('⚠️ فشل الاتصال المباشر بين الجهازين — أضف خادم TURN خاصاً من "إعدادات اتصال متقدمة"، أو استخدم الوضع المحلي إن كانا على نفس الواي فاي', 'warning');
+        }
+      };
+    } catch (e) {}
+  }
+
+  function _wirePeerJsConn(peerConn) {
+    let c = null;
+    _watchIceState(peerConn);
+    peerConn.on('open', () => {
+      spokeConnecting = false;
+      c = _registerConn(
+        obj => peerConn.send(obj),
+        () => peerConn.close(),
+        'internet'
+      );
+      _onConnOpen(c);
+    });
+    peerConn.on('data', d => { if (c) _onRawMessage(d, c); });
+    peerConn.on('close', () => { spokeConnecting = false; if (c) _onConnClose(c); });
+    peerConn.on('error', err => { spokeConnecting = false; _log('⚠️ خطأ في قناة البيانات (لن يُغلق الاتصال بسبب هذا وحده): ' + (err && err.message || err)); });
+  }
+
+  function stopInternetMode() {
+    if (internetTimer) { clearInterval(internetTimer); internetTimer = null; }
+    if (staleTimer) { clearInterval(staleTimer); staleTimer = null; }
+    conns.forEach((c, id) => { if (c.transport === 'internet') { try { c.close(); } catch (e) {} conns.delete(id); } });
+    if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
+    isHub = false; spokeConnecting = false;
+  }
+
+  function forceReconnect() {
+    _log('🔁 إعادة اتصال يدوية بطلب المستخدم');
+    stopInternetMode();
+    setTimeout(() => startInternetMode(), 300);
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  الوضع 2: اتصال محلي مباشر (كيبل/نفس الشبكة) — بدون إنترنت إطلاقاً
+  //  تبادل يدوي لـ "رمز دعوة" و"رمز رد" (نسخ/لصق) مرة واحدة فقط لكل زوج أجهزة
+  // ════════════════════════════════════════════════════════════
+  function _waitIceComplete(pc, timeoutMs) {
+    return new Promise(resolve => {
+      if (pc.iceGatheringState === 'complete') { resolve(); return; }
+      const t = setTimeout(() => { _log('⏱️ انتهت مهلة تجميع مسارات الاتصال — سنكمل بما تم جمعه حتى الآن'); resolve(); }, timeoutMs || LOCAL_ICE_TIMEOUT_MS);
+      pc.onicegatheringstatechange = () => {
+        _log('📡 حالة تجميع المسارات: ' + pc.iceGatheringState);
+        if (pc.iceGatheringState === 'complete') { clearTimeout(t); resolve(); }
+      };
+    });
+  }
+  function _watchLocalPcState(pc) {
+    pc.oniceconnectionstatechange = () => {
+      _log('🧭 حالة الشبكة المحلية (ICE): ' + pc.iceConnectionState);
+      if (pc.iceConnectionState === 'failed') {
+        _toast('⚠️ فشل الاتصال المحلي — تأكّد أن الجهازين على نفس الشبكة (الواي فاي)، أو جرّب وضع الإنترنت', 'warning');
+      }
+    };
+  }
+  function _encodeCode(obj) { return btoa(unescape(encodeURIComponent(JSON.stringify(obj)))); }
+  function _decodeCode(text) {
+    try { return JSON.parse(decodeURIComponent(escape(atob(String(text || '').trim())))); }
+    catch (e) { return null; }
+  }
+
+  // يوحّد رمز الفريق بين الجهازين المتزاوجين محلياً: إن لم يكن عندي رمز أصلاً
+  // أتبنّى رمز الطرف الآخر. إن كان عندي رمز مختلف مسبقاً، أُبقيه (حالة نادرة:
+  // كل جهاز كان جزءاً من فريق مختلف من قبل) وأكتفي بتنبيه في السجل، لأن
+  // الاتصال المباشر بين هذين الجهازين يبقى يعمل بغض النظر عن رمز الفريق.
+  function _reconcileTeamId(remoteTeamId) {
+    if (!remoteTeamId) return;
+    const mine = getTeamId();
+    if (!mine) {
+      createOrSetTeam(remoteTeamId, getDeviceName());
+      _log('🔗 اعتماد رمز الفريق من الجهاز الآخر: ' + remoteTeamId);
+    } else if (mine !== remoteTeamId) {
+      _log('⚠️ الجهازان لهما رمزا فريق مختلفان (' + mine + ' / ' + remoteTeamId + ') — الاتصال المباشر بينهما يعمل رغم ذلك، لكن لن يتوحّد الفريقان تلقائياً');
+    }
+  }
+
+  // الجهاز (أ): يولّد "رمز الدعوة"
+  async function localCreateInvite() {
+    if (pendingLocalPC) { _log('ℹ️ استبدال محاولة اتصال محلي سابقة لم تكتمل بمحاولة جديدة'); try { pendingLocalPC.close(); } catch (e) {} pendingLocalPC = null; }
+    // نضمن وجود رمز فريق فعلي قبل بناء الدعوة (نولّد واحداً إن لم يوجد) حتى
+    // يتبناه الجهاز الآخر بدل أن يولّد كل جهاز رمزاً عشوائياً مختلفاً بمفرده
+    let teamId = getTeamId();
+    if (!teamId) { teamId = _genTeamId(); createOrSetTeam(teamId, getDeviceName()); _log('🆕 أُنشئ رمز فريق جديد لهذا الاتصال المحلي: ' + teamId); }
+    _log('📝 إنشاء رمز دعوة جديد...');
+    const pc = new RTCPeerConnection({ iceServers: _getIceServers(), iceCandidatePoolSize: 6 });
+    _watchLocalPcState(pc);
+    const channel = pc.createDataChannel('dakani');
+    _wireLocalChannel(channel);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await _waitIceComplete(pc);
+    pendingLocalPC = pc;
+    _log('✅ رمز الدعوة جاهز — شاركه مع الجهاز الآخر');
+    return _encodeCode({ sdp: pc.localDescription, from: _deviceId(), name: getDeviceName(), teamId });
+  }
+
+  // الجهاز (أ): يُدخل "رمز الرد" القادم من الجهاز (ب) لإتمام الاتصال
+  async function localAcceptAnswer(answerCode) {
+    if (!pendingLocalPC) { _toast('⚠️ لم يبدأ أي اتصال محلي بعد — أنشئ رمز الدعوة أولاً', 'error'); return false; }
+    const obj = _decodeCode(answerCode);
+    if (!obj || !obj.sdp) { _toast('⚠️ الرمز غير صحيح — تأكد من نسخه كاملاً', 'error'); return false; }
+    try {
+      _log('🔗 تطبيق رمز الرد...');
+      _reconcileTeamId(obj.teamId);
+      await pendingLocalPC.setRemoteDescription(obj.sdp);
+      pendingLocalPC = null;
+      return true;
+    } catch (e) { _log('❌ فشل تطبيق رمز الرد: ' + (e && e.message || e)); _toast('❌ تعذّر إتمام الاتصال — تأكد من نسخ الرمز الصحيح والكامل', 'error'); return false; }
+  }
+
+  // الجهاز (ب): يلصق "رمز الدعوة" القادم من الجهاز (أ) ويولّد "رمز الرد"
+  async function localAcceptInvite(inviteCode) {
+    const obj = _decodeCode(inviteCode);
+    if (!obj || !obj.sdp) { _toast('⚠️ الرمز غير صحيح — تأكد من نسخه كاملاً', 'error'); return null; }
+    _log('📝 توليد رمز رد لدعوة من: ' + (obj.name || obj.from));
+    _reconcileTeamId(obj.teamId); // نتبنّى رمز فريق الجهاز الأول إن لم يكن عندي رمز أصلاً
+    const pc = new RTCPeerConnection({ iceServers: _getIceServers(), iceCandidatePoolSize: 6 });
+    _watchLocalPcState(pc);
+    pc.ondatachannel = e => _wireLocalChannel(e.channel);
+    await pc.setRemoteDescription(obj.sdp);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await _waitIceComplete(pc);
+    _log('✅ رمز الرد جاهز — أعده للجهاز الأول');
+    return _encodeCode({ sdp: pc.localDescription, from: _deviceId(), name: getDeviceName(), teamId: getTeamId() });
+  }
+
+  function _wireLocalChannel(channel) {
+    let c = null;
+    channel.onopen = () => {
+      c = _registerConn(
+        obj => channel.send(JSON.stringify(obj)),
+        () => channel.close(),
+        'local'
+      );
+      _onConnOpen(c);
+    };
+    channel.onmessage = e => { if (c) { try { _onRawMessage(JSON.parse(e.data), c); } catch (err) { _log('❌ رسالة غير صالحة عبر الاتصال المحلي'); } } };
+    channel.onclose = () => { if (c) _onConnClose(c); };
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  إنشاء/مغادرة الفريق
+  // ════════════════════════════════════════════════════════════
+  function createOrSetTeam(teamId, deviceName) {
+    const prev = getTeamId();
+    if (prev && prev !== teamId && (isConnected() || internetTimer)) {
+      _log('🔀 تبديل الفريق من ' + prev + ' إلى ' + teamId + ' — إيقاف الاتصال القديم أولاً');
+      _stopEverything();
+    }
+    _lsSetStr(LS_TEAMID, teamId);
+    _lsSetStr(LS_DEVICENAME, deviceName || _defaultDeviceName());
+  }
+
+  function leaveTeam() {
+    _stopEverything();
+    _lsDel(LS_TEAMID); _lsDel(LS_PUSHED); _lsDel(LS_KICKED_UNTIL);
+    _toast('تم مغادرة الفريق من هذا الجهاز', 'info');
+    if (typeof renderOnlineSyncPage === 'function') renderOnlineSyncPage();
+  }
+
+  function _stopEverything() {
+    stopInternetMode();
+    conns.forEach(c => { try { c.close(); } catch (e) {} });
+    conns.clear();
+    presence.clear();
+    if (pushTimer) { clearInterval(pushTimer); pushTimer = null; }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  فصل جهاز يعمل حالياً على الإنترنت — للمدير فقط
+  //  (يعمل فقط طالما هذا الجهاز متصل الآن — لا يوجد سجل دائم لحذفه لاحقاً)
+  // ════════════════════════════════════════════════════════════
+  function kickDevice(targetId) {
+    if (!_isManager()) { _toast('⚠️ هذا الإجراء متاح للمدير فقط / Manager only', 'warning'); return; }
+    if (!confirm('فصل هذا الجهاز عن الفريق الآن؟ (يمكنه محاولة العودة لاحقاً)\nDisconnect this device now?')) return;
+    _broadcastToAll({ type: 'kick', id: uid(), from: _deviceId(), targetId });
+    setTimeout(() => { presence.delete(targetId); _renderIfVisible(); }, 500);
+  }
+
+  function renameThisDevice(name) {
+    const clean = String(name || '').trim();
+    if (!clean) return;
+    _lsSetStr(LS_DEVICENAME, clean);
+    _broadcastToAll({ type: 'hello', id: uid(), from: _deviceId(), name: clean, ip: publicIp });
+    _toast('تم تحديث اسم الجهاز', 'success');
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  تنظيف الحضور القديم دورياً (لا يوجد إشعار إغلاق دائماً على كل الشبكات)
+  // ════════════════════════════════════════════════════════════
+  function _startPresenceCleanup() {
+    if (presenceTimer) return;
+    presenceTimer = setInterval(() => {
+      const cutoff = Date.now() - PRESENCE_STALE_MS;
+      let changed = false;
+      presence.forEach((v, k) => { if (new Date(v.lastSeen).getTime() < cutoff) { presence.delete(k); changed = true; } });
+      if (changed) _renderIfVisible();
+    }, 20000);
+  }
+
+  function _renderIfVisible() {
+    if (document.getElementById('page-online-sync')?.classList.contains('active') && typeof renderOnlineSyncPage === 'function') {
+      renderOnlineSyncPage();
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  الإقلاع التلقائي عند فتح التطبيق إن كان مُهيّأً مسبقاً
+  // ════════════════════════════════════════════════════════════
+  function _bootIfConfigured() {
+    _startPresenceCleanup();
+    if (isConfigured()) startInternetMode();
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  الواجهة — CSS
+  // ════════════════════════════════════════════════════════════
+  function _injectStyles() {
+    if (document.getElementById('dakani-onlinesync-style')) return;
+    const style = document.createElement('style');
+    style.id = 'dakani-onlinesync-style';
+    style.textContent = `
+      .os-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }
+      @media (max-width:900px){ .os-grid{ grid-template-columns:1fr; } }
+      .os-card { background:var(--surface,#111827); border:1px solid var(--border,#1e293b); border-radius:var(--radius,12px); padding:20px; }
+      .os-card h3 { margin:0 0 12px; font-size:15px; display:flex; align-items:center; gap:8px; }
+      .os-status { display:inline-flex; align-items:center; gap:6px; padding:4px 12px; border-radius:20px; font-size:12px; font-weight:700; }
+      .os-status.on { background:rgba(16,185,129,.15); color:#10b981; }
+      .os-status.off { background:rgba(148,163,184,.15); color:var(--text2,#94a3b8); }
+      .os-code-box { display:flex; gap:8px; align-items:flex-start; background:var(--surface3,#1e2d3d); border:1px solid var(--border2,#253347); border-radius:8px; padding:10px 12px; margin:10px 0; }
+      .os-code-box textarea, .os-code-box code { flex:1; font-family:monospace; font-size:11px; word-break:break-all; color:var(--accent,#10b981); background:none; border:none; resize:vertical; }
+      .os-tabs { display:flex; gap:8px; margin-bottom:14px; }
+      .os-tab { flex:1; text-align:center; padding:10px; border:1px solid var(--border2,#253347); border-radius:10px; cursor:pointer; font-size:13px; }
+      .os-tab.active { border-color:var(--accent,#10b981); background:rgba(16,185,129,.08); color:var(--accent,#10b981); font-weight:700; }
+      .os-hint { font-size:12px; color:var(--text2,#94a3b8); line-height:1.7; margin-top:6px; }
+      .os-device-row { display:flex; align-items:center; justify-content:space-between; padding:10px 0; border-bottom:1px solid var(--border,#1e293b); gap:10px; flex-wrap:wrap; }
+      .os-device-row:last-child { border-bottom:none; }
+      .os-device-meta { font-size:12px; color:var(--text2,#94a3b8); }
+      .os-badge-you { background:var(--accent,#10b981); color:#fff; font-size:10px; padding:2px 8px; border-radius:10px; margin-inline-start:6px; }
+      .os-badge-mode { font-size:10px; padding:2px 8px; border-radius:10px; margin-inline-start:6px; background:rgba(14,165,233,.15); color:#0ea5e9; }
+      .os-danger-zone { border:1px solid rgba(239,68,68,.35); border-radius:10px; padding:14px; margin-top:16px; }
+      .os-danger-zone h4 { margin:0 0 8px; color:#ef4444; font-size:13px; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  الواجهة — الصفحة
+  // ════════════════════════════════════════════════════════════
+  function _injectPageShell() {
+    if (document.getElementById('page-online-sync')) return;
+    const main = document.getElementById('main-content');
+    if (!main) return;
+    const div = document.createElement('div');
+    div.className = 'page';
+    div.id = 'page-online-sync';
+    div.innerHTML = `<div class="page-header"><h1>العمل عبر الإنترنت <span>Online Team Sync</span></h1></div>
+      <div id="os-content"></div>`;
+    main.appendChild(div);
+  }
+
+  function _setupHtml() {
+    return `
+      <div class="os-card">
+        <h3><i class="fas fa-tower-broadcast"></i> ربط أجهزة المحل ببعضها / Link your devices</h3>
+        <p class="os-hint">
+          يربط هذا الخيار كل أجهزة محلك (مكاتب، هاتف، حاسوب...) مباشرة ببعضها — دون أي خادم بيانات وسيط،
+          البيانات تنتقل مباشرة من جهاز إلى آخر فقط. إن انقطع الاتصال يستمر التطبيق يعمل محلياً كالمعتاد،
+          وعند عودته تُستكمل عملية النقل تلقائياً.
+        </p>
+        <div class="form-group" style="margin-top:14px;"><label>اسم هذا الجهاز / This device name</label>
+          <input type="text" id="os-devname-input" value="${escHtml(_defaultDeviceName())}"/>
+        </div>
+      </div>
+
+      <div class="os-grid" style="margin-top:16px;">
+        <div class="os-card">
+          <h3><i class="fas fa-wifi"></i> عبر الإنترنت (تلقائي)</h3>
+          <p class="os-hint">أدخل نفس "رمز الفريق" في كل الأجهزة — يتصلون تلقائياً حتى لو كانوا في مدن مختلفة.</p>
+          <div class="form-group"><label>رمز الفريق / Team code</label>
+            <input type="text" id="os-teamid-input" placeholder="مثال: ABC123XYZ9" style="text-transform:uppercase;"/>
+          </div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn-primary" onclick="DakaniOnlineSync._submitGenTeam()"><i class="fas fa-plus"></i> إنشاء رمز جديد</button>
+            <button class="btn-secondary" onclick="DakaniOnlineSync._submitJoinTeam()"><i class="fas fa-right-to-bracket"></i> اتصال بهذا الرمز</button>
+          </div>
+        </div>
+
+        <div class="os-card">
+          <h3><i class="fas fa-plug"></i> اتصال محلي / بدون إنترنت</h3>
+          <p class="os-hint">مناسب لجهازين في نفس المكان (نفس الواي فاي) لا يحتاج إنترنت إطلاقاً. خطوتان بالنسخ واللصق.</p>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn-secondary" onclick="DakaniOnlineSync._showLocalCreate()"><i class="fas fa-arrow-up-from-bracket"></i> أنا البادئ (أرسل رمز دعوة)</button>
+            <button class="btn-secondary" onclick="DakaniOnlineSync._showLocalAccept()"><i class="fas fa-arrow-down-to-bracket"></i> استلمت رمز دعوة</button>
+          </div>
+          <div id="os-local-area" style="margin-top:12px;"></div>
+        </div>
+      </div>
+    `;
+  }
+
+  function _submitGenTeam() {
+    const name = document.getElementById('os-devname-input')?.value;
+    const teamId = _genTeamId();
+    createOrSetTeam(teamId, name);
+    startInternetMode();
+    _toast('✅ تم إنشاء رمز الفريق: ' + teamId + ' — شاركه مع بقية الأجهزة', 'success');
+    renderOnlineSyncPage();
+  }
+  function _submitJoinTeam() {
+    const name = document.getElementById('os-devname-input')?.value;
+    const teamId = (document.getElementById('os-teamid-input')?.value || '').trim().toUpperCase();
+    if (!teamId) { _toast('أدخل رمز الفريق أولاً', 'warning'); return; }
+    createOrSetTeam(teamId, name);
+    startInternetMode();
+    renderOnlineSyncPage();
+  }
+
+  async function _showLocalCreate() {
+    const area = document.getElementById('os-local-area');
+    if (!area) return;
+    area.innerHTML = `<div class="os-hint">جارٍ توليد رمز الدعوة...</div>`;
+    const code = await localCreateInvite();
+    area.innerHTML = `
+      <div class="form-group"><label>1) شارك رمز الدعوة هذا مع الجهاز الآخر</label>
+        <div class="os-code-box"><textarea readonly rows="3" id="os-invite-out">${escHtml(code)}</textarea>
+          <button class="btn-icon" onclick="DakaniOnlineSync._copyEl('os-invite-out')"><i class="fas fa-copy"></i></button></div>
+      </div>
+      <div class="form-group"><label>2) الصق "رمز الرد" القادم من الجهاز الآخر هنا</label>
+        <textarea id="os-answer-in" rows="3" placeholder="الصق رمز الرد هنا"></textarea>
+      </div>
+      <button class="btn-primary" onclick="DakaniOnlineSync._submitLocalAnswer()"><i class="fas fa-link"></i> إتمام الاتصال</button>`;
+  }
+  function _showLocalAccept() {
+    const area = document.getElementById('os-local-area');
+    if (!area) return;
+    area.innerHTML = `
+      <div class="form-group"><label>1) الصق رمز الدعوة القادم من الجهاز الآخر</label>
+        <textarea id="os-invite-in" rows="3" placeholder="الصق رمز الدعوة هنا"></textarea>
+      </div>
+      <button class="btn-primary" onclick="DakaniOnlineSync._submitLocalInvite()"><i class="fas fa-reply"></i> توليد رمز الرد</button>
+      <div id="os-answer-out-area" style="margin-top:10px;"></div>`;
+  }
+  async function _submitLocalInvite() {
+    const typedName = document.getElementById('os-devname-input')?.value.trim();
+    if (typedName) _lsSetStr(LS_DEVICENAME, typedName);
+    const val = document.getElementById('os-invite-in')?.value;
+    const code = await localAcceptInvite(val);
+    if (!code) return;
+    document.getElementById('os-answer-out-area').innerHTML = `
+      <label class="os-hint">3) أرسل رمز الرد هذا للجهاز الأول لإتمام الاتصال</label>
+      <div class="os-code-box"><textarea readonly rows="3" id="os-answer-out">${escHtml(code)}</textarea>
+        <button class="btn-icon" onclick="DakaniOnlineSync._copyEl('os-answer-out')"><i class="fas fa-copy"></i></button></div>`;
+  }
+  async function _submitLocalAnswer() {
+    const typedName = document.getElementById('os-devname-input')?.value.trim();
+    if (typedName) _lsSetStr(LS_DEVICENAME, typedName);
+    const val = document.getElementById('os-answer-in')?.value;
+    const ok = await localAcceptAnswer(val);
+    if (ok) { _toast('✅ تم الاتصال المحلي بنجاح', 'success'); renderOnlineSyncPage(); }
+  }
+  function _copyEl(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    navigator.clipboard?.writeText(el.value || el.textContent).then(() => _toast('تم النسخ ✓', 'success')).catch(() => {});
+  }
+
+  function _connectedHtml() {
+    const manager = _isManager();
+    const myId = _deviceId();
+    const list = Array.from(presence.entries()).map(([id, v]) => Object.assign({ id }, v))
+      .sort((a, b) => (b.lastSeen || '').localeCompare(a.lastSeen || ''));
+
+    const rows = list.length ? list.map(d => `
+      <div class="os-device-row">
+        <div>
+          <strong>${escHtml(d.name || 'جهاز')}</strong>
+          <span class="os-badge-mode">${d.transport === 'internet' ? 'إنترنت' : 'محلي'}</span>
+          <div class="os-device-meta">
+            <i class="fas fa-globe"></i> ${escHtml(d.ip || 'غير معروف')} &nbsp;•&nbsp; آخر تواصل: ${_relTime(d.lastSeen)}
+          </div>
+        </div>
+        ${manager ? `<button class="btn-icon danger" title="فصل الجهاز" onclick="DakaniOnlineSync.kickDevice('${escHtml(d.id)}')"><i class="fas fa-trash"></i></button>` : ''}
+      </div>`).join('') : `<div class="os-hint">لا توجد أجهزة متصلة حالياً — الأجهزة تظهر هنا فور اتصالها فعلياً.</div>`;
+
+    return `
+      <div class="os-grid">
+        <div class="os-card">
+          <h3><i class="fas fa-circle-nodes"></i> حالة الاتصال
+            <span class="os-status ${isConnected() ? 'on' : 'off'}" style="margin-inline-start:auto;">
+              <i class="fas fa-circle" style="font-size:8px;"></i> ${isConnected() ? 'متصل الآن' : 'بانتظار اتصال'}
+            </span>
+          </h3>
+          <p class="os-hint">اسم هذا الجهاز:</p>
+          <div style="display:flex; gap:8px;">
+            <input type="text" id="os-rename-input" value="${escHtml(getDeviceName())}" style="flex:1;"/>
+            <button class="btn-secondary" onclick="DakaniOnlineSync._submitRename()"><i class="fas fa-pen"></i></button>
+          </div>
+        </div>
+        <div class="os-card">
+          <h3><i class="fas fa-key"></i> رمز الفريق / Team code</h3>
+          <p class="os-hint">شاركه مع أي جهاز جديد تريد ربطه (يدخله في خانة "اتصال بهذا الرمز").</p>
+          <div class="os-code-box"><code id="os-teamid-out">${escHtml(getTeamId())}</code>
+            <button class="btn-icon" onclick="DakaniOnlineSync._copyEl('os-teamid-out')"><i class="fas fa-copy"></i></button></div>
+          <p class="os-hint">لإضافة جهاز محلي بدون إنترنت، افتح "اتصال محلي" من هذه الصفحة على الجهازين.</p>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:6px;">
+            <button class="btn-secondary" onclick="DakaniOnlineSync._showLocalCreate()"><i class="fas fa-arrow-up-from-bracket"></i> أنا البادئ</button>
+            <button class="btn-secondary" onclick="DakaniOnlineSync._showLocalAccept()"><i class="fas fa-arrow-down-to-bracket"></i> استلمت رمز دعوة</button>
+          </div>
+          <div id="os-local-area" style="margin-top:10px;"></div>
+        </div>
+      </div>
+      <div class="os-card" style="margin-bottom:16px;">
+        <h3><i class="fas fa-laptop-mobile"></i> الأجهزة المتصلة الآن / Currently Connected
+          <button class="btn-icon" title="إعادة محاولة الاتصال" style="margin-inline-start:auto;" onclick="DakaniOnlineSync.forceReconnect()"><i class="fas fa-rotate"></i></button>
+        </h3>
+        ${rows}
+      </div>
+      <div class="os-card" style="margin-bottom:16px;">
+        <h3><i class="fas fa-stethoscope"></i> سجل التشخيص / Diagnostics
+          <span class="os-badge-mode">أرسلت: ${sentCount}</span><span class="os-badge-mode">استلمت: ${recvCount}</span>
+          <button class="btn-icon" title="نسخ السجل" style="margin-inline-start:auto;" onclick="DakaniOnlineSync._copyLog()"><i class="fas fa-copy"></i></button>
+        </h3>
+        <p class="os-hint">إن لم يظهر جهاز آخر، افتح هذا السجل في كلا الجهازين وقارن أين توقفت الأحداث — هذا يوضح بالضبط أين تعطّل الاتصال.</p>
+        <div class="os-code-box" style="max-height:220px; overflow-y:auto; display:block;">
+          ${DEBUG_LOG.length ? DEBUG_LOG.slice().reverse().map(l => `<div style="font-family:monospace; font-size:11px; color:var(--text2,#94a3b8); padding:2px 0; border-bottom:1px solid var(--border,#1e293b);">${escHtml(l)}</div>`).join('') : '<div class="os-hint">لا توجد أحداث بعد</div>'}
+        </div>
+      </div>
+      <div class="os-hint" style="margin-bottom:10px;"><i class="fas fa-circle-info"></i>
+        صور المنتجات لا تُنقَل عبر هذا الجسر (لتفادي إبطاء الاتصال المباشر) — فقط الأسعار والكميات والبيانات النصية.
+        المزامنة تراكمية فقط: لا يُحذف أي شيء محلياً تلقائياً حتى لو حُذف في جهاز آخر.
+        كذلك: يجب أن يكون الجهازان مفتوحين معاً (أو يتداخل وقت فتحهما) لينتقل أي تحديث بينهما مباشرة أو عبر جهاز وسيط من نفس الفريق.
+      </div>
+      ${manager ? _advancedSettingsHtml() : ''}
+      ${manager ? `
+      <div class="os-danger-zone">
+        <h4><i class="fas fa-triangle-exclamation"></i> منطقة خطرة — للمدير فقط</h4>
+        <button class="btn-secondary" onclick="DakaniOnlineSync._confirmLeave()"><i class="fas fa-plug-circle-xmark"></i> مغادرة الفريق من هذا الجهاز</button>
+      </div>` : ''}
+    `;
+  }
+  function _copyLog() {
+    navigator.clipboard?.writeText(DEBUG_LOG.join('\n')).then(() => _toast('تم نسخ سجل التشخيص ✓', 'success')).catch(() => {});
+  }
+
+  // ─── إعدادات اتصال متقدمة: خادم TURN خاص ─────────────────────────────────
+  // الخادم المجاني الاحتياطي المدمج قد لا يكفي دائماً بين شبكات مختلفة جداً
+  // (كواي فاي + بيانات جوال معاً). الحل الموثوق (وهو ما تفعله التطبيقات
+  // الكبرى فعلياً) هو استخدام خادم TURN مخصّص. يمكن الحصول على واحد مجاناً
+  // بحساب شخصي (وليس بيانات تجريبية مشتركة) من مزوّدين مثل metered.ca أو
+  // Xirsys — يعطيانك عنوان خادم واسم مستخدم وكلمة مرور تُلصق هنا مباشرة.
+  function _advancedSettingsHtml() {
+    const cur = _lsGet(LS_CUSTOM_TURN, null);
+    const hasCustom = Array.isArray(cur) && cur.length > 0;
+    return `
+      <div class="os-card" style="margin-bottom:16px;">
+        <h3><i class="fas fa-sliders"></i> إعدادات اتصال متقدمة (اختياري) / Advanced connection settings</h3>
+        <p class="os-hint">
+          التطبيق يحاول تلقائياً عدة خوادم مجانية بلا أي تسجيل حساب لمساعدة الأجهزة على الاتصال ببعضها.
+          هذا يكفي في الغالبية العظمى من الحالات. لكن أصعب حالة (كواي فاي مع بيانات جوال معاً على شبكتين مختلفتين
+          تماماً) قد تحتاج أحياناً خادم "تحويل" (TURN) إضافياً أوثق — وهذا اختياري تماماً، لا داعي له إن كان
+          الاتصال يعمل عندك فعلاً.
+        </p>
+        <p class="os-hint">
+          لا يوجد للأسف خادم TURN مجاني بالكامل يعمل بلا أي تسجيل حساب لأن تشغيله يكلّف مزوّده فعلياً (نقل بيانات حقيقي) —
+          حتى التطبيقات الكبرى (واتساب، زوم) تُشغّل خوادمها الخاصة. أقرب حل بلا أي تكلفة فعلية هو تسجيل بريد إلكتروني
+          فقط (بلا بطاقة بنكية) في خدمة مثل <a href="https://www.expressturn.com" target="_blank" rel="noopener">expressturn.com</a>
+          (تعطي 1000 جيجابايت مجاناً شهرياً بلا بطاقة بنكية)، ثم لصق بيانات الاتصال هنا.
+        </p>
+        <p class="os-hint"><strong>الطريقة الأسهل:</strong> إن استخدمت خدمة تعطيك مصفوفة iceServers جاهزة، انسخها كاملة
+          (تبدأ بـ <code>[</code> وتنتهي بـ <code>]</code>) والصقها هنا مباشرة:</p>
+        <div class="form-group"><label>الصق مصفوفة iceServers كاملة هنا (الأسهل)</label>
+          <textarea id="os-turn-array" rows="5" placeholder='[{"urls":"stun:...","...":"..."}, {"urls":"turn:...","username":"...","credential":"..."}]'></textarea>
+        </div>
+        <button class="btn-primary" onclick="DakaniOnlineSync._saveCustomTurnArray()"><i class="fas fa-floppy-disk"></i> حفظ من المصفوفة الملصقة</button>
+
+        <p class="os-hint" style="margin-top:16px;">— أو أدخل خادماً واحداً يدوياً (مثلاً بصيغة turn:host:port من لوحة تحكم expressturn) —</p>
+        <div class="form-group"><label>عنوان الخادم / TURN URL</label>
+          <input type="text" id="os-turn-url" placeholder="turn:example.com:3478"/>
+        </div>
+        <div class="form-group"><label>اسم المستخدم / Username</label>
+          <input type="text" id="os-turn-user" placeholder="username"/>
+        </div>
+        <div class="form-group"><label>كلمة المرور / Credential</label>
+          <input type="text" id="os-turn-pass" placeholder="credential"/>
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn-secondary" onclick="DakaniOnlineSync._saveCustomTurn()"><i class="fas fa-floppy-disk"></i> حفظ الخادم اليدوي</button>
+          ${hasCustom ? `<button class="btn-secondary" onclick="DakaniOnlineSync._clearCustomTurn()"><i class="fas fa-trash"></i> إزالة الخادم المخصّص</button>` : ''}
+        </div>
+        ${hasCustom ? `<p class="os-hint"><i class="fas fa-check-circle" style="color:var(--accent,#10b981);"></i> خادم مخصّص مُفعَّل حالياً (${cur.length} إدخال) كأولوية أولى.</p>` : ''}
+      </div>`;
+  }
+  function _parseIceArrayPaste(text) {
+    try {
+      const start = text.indexOf('['), end = text.lastIndexOf(']');
+      if (start === -1 || end === -1) return null;
+      let body = text.slice(start, end + 1).replace(/,(\s*[\]}])/g, '$1'); // إزالة فواصل زائدة قبل ] أو }
+      const arr = JSON.parse(body);
+      return (Array.isArray(arr) && arr.length) ? arr.filter(e => e && e.urls) : null;
+    } catch (e) { return null; }
+  }
+  function _saveCustomTurnArray() {
+    const text = document.getElementById('os-turn-array')?.value || '';
+    const arr = _parseIceArrayPaste(text);
+    if (!arr || !arr.length) { _toast('⚠️ تعذّر قراءة المصفوفة — تأكد من نسخها كاملة من [ إلى ]', 'error'); return; }
+    _lsSet(LS_CUSTOM_TURN, arr);
+    _log('⚙️ حُفظت مصفوفة TURN مخصّصة (' + arr.length + ' إدخال) — إعادة الاتصال الآن');
+    _toast('✅ تم الحفظ — جارٍ إعادة الاتصال', 'success');
+    forceReconnect();
+    renderOnlineSyncPage();
+  }
+  function _saveCustomTurn() {
+    const urls = document.getElementById('os-turn-url')?.value.trim();
+    const username = document.getElementById('os-turn-user')?.value.trim();
+    const credential = document.getElementById('os-turn-pass')?.value.trim();
+    if (!urls) { _toast('أدخل عنوان الخادم أولاً', 'warning'); return; }
+    _lsSet(LS_CUSTOM_TURN, [{ urls, username, credential }]);
+    _log('⚙️ حُفظ خادم TURN مخصّص — إعادة الاتصال به الآن');
+    _toast('✅ تم الحفظ — جارٍ إعادة الاتصال', 'success');
+    forceReconnect();
+    renderOnlineSyncPage();
+  }
+  function _clearCustomTurn() {
+    _lsDel(LS_CUSTOM_TURN);
+    _log('⚙️ أُزيل خادم TURN المخصّص — العودة للخادم الاحتياطي المدمج');
+    _toast('تمت الإزالة', 'info');
+    forceReconnect();
+    renderOnlineSyncPage();
+  }
+
+  function _submitRename() { renameThisDevice(document.getElementById('os-rename-input')?.value); }
+  function _confirmLeave() {
+    if (!confirm('مغادرة الفريق من هذا الجهاز فقط؟ بقية الأجهزة تبقى مرتبطة ببعضها.\nLeave the team from this device only?')) return;
+    leaveTeam();
+  }
+
+  function renderOnlineSyncPage() {
+    _injectStyles();
+    _injectPageShell();
+    const content = document.getElementById('os-content');
+    if (!content) return;
+    content.innerHTML = isConfigured() ? _connectedHtml() : _setupHtml();
+  }
+
+  function _showOnlineSyncPage() {
+    _injectPageShell();
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.getElementById('page-online-sync').classList.add('active');
+    document.querySelector('[data-page="online-sync"]')?.classList.add('active');
+    const title = document.getElementById('topbar-title');
+    if (title) title.textContent = 'العمل عبر الإنترنت / Online Team Sync';
+    renderOnlineSyncPage();
+    if (window.innerWidth < 900) document.getElementById('sidebar')?.classList.remove('open');
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  ربط الشريط الجانبي + التنقّل — دون لمس script.js
+  // ════════════════════════════════════════════════════════════
+  function _injectSidebarNavItem() {
+    if (document.querySelector('[data-page="online-sync"]')) return;
+    const nav = document.querySelector('.sidebar-nav');
+    const settingsItem = document.querySelector('.sidebar-nav [data-page="settings"]');
+    if (!nav) return;
+    const a = document.createElement('a');
+    a.href = '#'; a.className = 'nav-item'; a.dataset.page = 'online-sync';
+    a.innerHTML = `<i class="fas fa-tower-broadcast"></i><span class="nav-ar">العمل عبر الإنترنت</span>`;
+    a.addEventListener('click', e => { e.preventDefault(); if (typeof navigateTo === 'function') navigateTo('online-sync'); else _showOnlineSyncPage(); });
+    if (settingsItem) nav.insertBefore(a, settingsItem); else nav.appendChild(a);
+  }
+
+  function _wrapNavigateTo() {
+    if (typeof window.navigateTo !== 'function' || window.navigateTo.__dakaniOnlineWrapped) return;
+    const original = window.navigateTo;
+    const wrapped = function (page) {
+      if (page === 'online-sync') {
+        if (!_isManager()) { _toast('⚠️ هذه الصفحة متاحة للمدير فقط / Manager only', 'warning'); return; }
+        _showOnlineSyncPage();
+        return;
+      }
+      original(page);
+    };
+    wrapped.__dakaniOnlineWrapped = true;
+    window.navigateTo = wrapped;
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  التهيئة
+  // ════════════════════════════════════════════════════════════
+  function _boot() {
+    _injectStyles();
+    _injectSidebarNavItem();
+    _wrapNavigateTo();
+    _wrapCheckout();
+    _bootIfConfigured();
+    _watchAppLifecycle();
+  }
+
+  // يعيد محاولة الاتصال فوراً عند عودة الإنترنت أو عند إظهار التطبيق مجدداً
+  // (المتصفحات تُبطئ المؤقّتات في الخلفية، فلا يكفي الاعتماد على العدّاد
+  // الدوري وحده) — يعمل بغض النظر عن كون المستخدم الحالي مديراً أو موظفاً،
+  // لأن المزامنة تعمل في الخلفية دوماً بمجرد تفعيلها مرة واحدة
+  function _watchAppLifecycle() {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && isConfigured()) {
+        _log('👀 التطبيق ظاهر الآن — التحقق من الاتصال');
+        _ensureConnected();
+        _tryAutoRefresh();
+      }
+    });
+    window.addEventListener('online', () => {
+      if (isConfigured()) { _log('🌐 عاد الاتصال بالإنترنت — إعادة المحاولة فوراً'); _ensureConnected(); }
+    });
+  }
+  // يضمن محاولة اتصال فورية حتى لو كانت حلقة إعادة المحاولة الدورية تعمل
+  // بالفعل (تلك الحلقة قد تتباطأ في الخلفية على المتصفحات، فلا تكفي وحدها)
+  function _ensureConnected() {
+    if (!isConfigured() || _hasOpenInternetConn()) return;
+    if (peer && !peer.destroyed) _resetPeer('فحص عند العودة للواجهة — لا يوجد اتصال فعلي رغم وجود جلسة سابقة');
+    if (!internetTimer) { startInternetMode(); return; }
+    _tryBecomeHubOrSpoke();
+  }
+
+  function init() { _boot(); }
+
+  return {
+    init, isConfigured, isConnected, getTeamId, getDeviceName,
+    createOrSetTeam, startInternetMode, stopInternetMode, forceReconnect, leaveTeam, kickDevice, renameThisDevice,
+    localCreateInvite, localAcceptInvite, localAcceptAnswer,
+    renderOnlineSyncPage, _showOnlineSyncPage,
+    _submitGenTeam, _submitJoinTeam, _showLocalCreate, _showLocalAccept,
+    _submitLocalInvite, _submitLocalAnswer, _submitRename, _copyEl, _copyLog, _confirmLeave,
+    _saveCustomTurn, _saveCustomTurnArray, _clearCustomTurn
+  };
+
+})();
+
+document.addEventListener('DOMContentLoaded', () => {
+  setTimeout(() => DakaniOnlineSync.init(), 0);
+});
